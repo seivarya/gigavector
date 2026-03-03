@@ -5,6 +5,11 @@
 #include <float.h>
 #include <stdint.h>
 #include <limits.h>
+#if defined(__AVX2__) || defined(__AVX512F__)
+#include <immintrin.h>
+#elif defined(__SSE4_2__)
+#include <nmmintrin.h>
+#endif
 
 #include "gigavector/gv_hnsw.h"
 #include "gigavector/gv_distance.h"
@@ -13,18 +18,15 @@
 #include "gigavector/gv_binary_quant.h"
 #include "gigavector/gv_soa_storage.h"
 
-typedef struct GV_HNSWNode {
+typedef struct {
     size_t vector_index;             /**< Index into GV_SoAStorage */
     GV_BinaryVector *binary_vector;  /**< Binary quantized version for fast search */
-    struct GV_HNSWNode ***neighbors;
-    size_t *neighbor_counts;
     size_t level;
-    size_t index;                    /**< Stable index position in GV_HNSWIndex::nodes */
     int deleted;                     /**< Deletion flag: 1 if deleted, 0 if active */
 } GV_HNSWNode;
 
 typedef struct {
-    GV_HNSWNode *node;
+    size_t node_idx;     /**< Index into nodes[] array */
     float distance;
 } GV_HNSWCandidate;
 
@@ -38,92 +40,78 @@ typedef struct {
     size_t quant_rerank;
     int use_acorn;
     size_t acorn_hops;
-    GV_HNSWNode *entryPoint;
+    GV_DistanceType distance_type;
+    size_t entry_point;              /**< Node index of entry point (SIZE_MAX = none) */
     size_t count;
-    GV_HNSWNode **nodes;
     size_t nodes_capacity;
-    GV_SoAStorage *soa_storage;      /**< Structure-of-Arrays storage for vectors */
-    int soa_storage_owned;           /**< 1 if we own the storage (should destroy), 0 if shared */
+    GV_HNSWNode *nodes;              /**< Array of node structs */
+
+    int32_t *neighbors;              /**< Flat neighbor array, -1 = empty sentinel */
+    size_t *offsets;                 /**< offsets[i] = start of node i's neighbors in neighbors[] */
+    size_t neighbors_size;           /**< Total used int32_t slots in neighbors[] */
+    size_t neighbors_capacity;       /**< Total allocated int32_t slots in neighbors[] */
+    size_t *cum_nb_per_level;        /**< Cumulative neighbor slots per level */
+    size_t max_level_alloc;          /**< Size of cum_nb_per_level array */
+
+    GV_SoAStorage *soa_storage;
+    int soa_storage_owned;
+
+    uint32_t *visited_epoch;
+    uint32_t current_epoch;
+    size_t visited_capacity;
+
+    float *search_dis;
+    size_t *search_ids;
+    uint8_t *search_proc;
+    size_t search_buf_size;
+    float *insert_dis;
+    size_t *insert_ids;
+    uint8_t *insert_proc;
+    size_t insert_buf_size;
 } GV_HNSWIndex;
 
 static const char *gv_metadata_get_direct(GV_Metadata *metadata, const char *key) {
-    if (metadata == NULL || key == NULL) {
-        return NULL;
-    }
+    if (metadata == NULL || key == NULL) return NULL;
     GV_Metadata *current = metadata;
     while (current != NULL) {
-        if (strcmp(current->key, key) == 0) {
-            return current->value;
-        }
+        if (strcmp(current->key, key) == 0) return current->value;
         current = current->next;
     }
     return NULL;
 }
 
 static GV_Metadata *gv_metadata_copy(GV_Metadata *src) {
-    if (src == NULL) {
-        return NULL;
-    }
-    GV_Metadata *head = NULL;
-    GV_Metadata *tail = NULL;
+    if (src == NULL) return NULL;
+    GV_Metadata *head = NULL, *tail = NULL;
     GV_Metadata *current = src;
-    
     while (current != NULL) {
         GV_Metadata *new_meta = (GV_Metadata *)malloc(sizeof(GV_Metadata));
         if (new_meta == NULL) {
-            /* Free what we've allocated so far */
-            while (head != NULL) {
-                GV_Metadata *next = head->next;
-                free(head->key);
-                free(head->value);
-                free(head);
-                head = next;
-            }
+            while (head) { GV_Metadata *n = head->next; free(head->key); free(head->value); free(head); head = n; }
             return NULL;
         }
         new_meta->key = (char *)malloc(strlen(current->key) + 1);
         new_meta->value = (char *)malloc(strlen(current->value) + 1);
-        if (new_meta->key == NULL || new_meta->value == NULL) {
-            free(new_meta->key);
-            free(new_meta->value);
-            free(new_meta);
-            /* Free what we've allocated so far */
-            while (head != NULL) {
-                GV_Metadata *next = head->next;
-                free(head->key);
-                free(head->value);
-                free(head);
-                head = next;
-            }
+        if (!new_meta->key || !new_meta->value) {
+            free(new_meta->key); free(new_meta->value); free(new_meta);
+            while (head) { GV_Metadata *n = head->next; free(head->key); free(head->value); free(head); head = n; }
             return NULL;
         }
         strcpy(new_meta->key, current->key);
         strcpy(new_meta->value, current->value);
         new_meta->next = NULL;
-        
-        if (head == NULL) {
-            head = tail = new_meta;
-        } else {
-            tail->next = new_meta;
-            tail = new_meta;
-        }
+        if (!head) { head = tail = new_meta; } else { tail->next = new_meta; tail = new_meta; }
         current = current->next;
     }
     return head;
 }
 
-static double random_level(void) {
-    return -log((double)rand() / (RAND_MAX + 1.0)) * 1.4426950408889634;
-}
-
-static size_t calculate_level(size_t maxLevel) {
-    size_t level = 0;
-    double r = random_level();
-    while (r < 1.0 && level < maxLevel) {
-        level++;
-        r = random_level();
-    }
-    return level;
+static size_t calculate_level(size_t maxLevel, size_t M) {
+    double r = (double)rand() / ((double)RAND_MAX + 1.0);
+    if (r == 0.0) r = 1e-18;
+    double mL = 1.0 / log((double)M);
+    size_t level = (size_t)(-log(r) * mL);
+    return (level > maxLevel) ? maxLevel : level;
 }
 
 static int compare_candidates(const void *a, const void *b) {
@@ -134,31 +122,192 @@ static int compare_candidates(const void *a, const void *b) {
     return 0;
 }
 
-static void gv_hnsw_node_destroy(GV_HNSWNode *node) {
-    if (node == NULL) return;
-    if (node->neighbors) {
-        for (size_t l = 0; l <= node->level; ++l) {
-            free(node->neighbors[l]);
+static void build_cum_nb_per_level(GV_HNSWIndex *index) {
+    for (size_t l = 0; l <= index->max_level_alloc; ++l) {
+        if (l == 0) {
+            index->cum_nb_per_level[l] = 0;
+        } else if (l == 1) {
+            index->cum_nb_per_level[l] = 2 * index->M;
+        } else {
+            index->cum_nb_per_level[l] = index->cum_nb_per_level[l - 1] + index->M;
         }
-        free(node->neighbors);
     }
-    free(node->neighbor_counts);
-    /* Vector is stored in SoA, don't destroy it here */
-    if (node->binary_vector != NULL) {
-        gv_binary_vector_destroy(node->binary_vector);
+}
+
+static inline size_t nb_slots_for_level(const GV_HNSWIndex *index, size_t level) {
+    if (level + 1 <= index->max_level_alloc) {
+        return index->cum_nb_per_level[level + 1];
     }
-    free(node);
+    return 2 * index->M + level * index->M;
+}
+
+static inline int32_t *nb_begin(const GV_HNSWIndex *index, size_t node_idx, size_t level) {
+    return index->neighbors + index->offsets[node_idx] + index->cum_nb_per_level[level];
+}
+
+static inline size_t max_nb_at_level(const GV_HNSWIndex *index, size_t level) {
+    return (level == 0) ? 2 * index->M : index->M;
+}
+
+static inline size_t count_neighbors(const GV_HNSWIndex *index, size_t node_idx, size_t level) {
+    int32_t *start = nb_begin(index, node_idx, level);
+    size_t max_n = max_nb_at_level(index, level);
+    size_t cnt = 0;
+    for (size_t i = 0; i < max_n; ++i) {
+        if (start[i] < 0) break;
+        cnt++;
+    }
+    return cnt;
+}
+
+static inline float gv_hnsw_l2_scalar(const float *a, const float *b, size_t dim) {
+    float sum = 0.0f;
+    for (size_t i = 0; i < dim; ++i) {
+        float d = a[i] - b[i];
+        sum += d * d;
+    }
+    return sum;
+}
+
+#ifdef __AVX2__
+static inline float gv_hnsw_l2_avx2(const float *a, const float *b, size_t dim) {
+    __m256 acc = _mm256_setzero_ps();
+    size_t i = 0;
+    for (; i + 8 <= dim; i += 8) {
+        __m256 va = _mm256_loadu_ps(a + i);
+        __m256 vb = _mm256_loadu_ps(b + i);
+        __m256 diff = _mm256_sub_ps(va, vb);
+        acc = _mm256_fmadd_ps(diff, diff, acc);
+    }
+    float tmp[8];
+    _mm256_storeu_ps(tmp, acc);
+    float sum = tmp[0]+tmp[1]+tmp[2]+tmp[3]+tmp[4]+tmp[5]+tmp[6]+tmp[7];
+    for (; i < dim; ++i) { float d = a[i] - b[i]; sum += d * d; }
+    return sum;
+}
+
+static inline float gv_hnsw_dot_avx2(const float *a, const float *b, size_t dim) {
+    __m256 acc = _mm256_setzero_ps();
+    size_t i = 0;
+    for (; i + 8 <= dim; i += 8) {
+        __m256 va = _mm256_loadu_ps(a + i);
+        __m256 vb = _mm256_loadu_ps(b + i);
+        acc = _mm256_fmadd_ps(va, vb, acc);
+    }
+    float tmp[8];
+    _mm256_storeu_ps(tmp, acc);
+    float sum = tmp[0]+tmp[1]+tmp[2]+tmp[3]+tmp[4]+tmp[5]+tmp[6]+tmp[7];
+    for (; i < dim; ++i) sum += a[i] * b[i];
+    return sum;
+}
+#endif
+
+static float gv_hnsw_raw_distance(const float *a, const float *b, size_t dim,
+                                   GV_DistanceType dtype) {
+    switch (dtype) {
+    case GV_DISTANCE_EUCLIDEAN:
+#ifdef __AVX2__
+        return gv_hnsw_l2_avx2(a, b, dim);
+#else
+        return gv_hnsw_l2_scalar(a, b, dim);
+#endif
+    case GV_DISTANCE_COSINE: {
+        float dot = 0.0f, na = 0.0f, nb = 0.0f;
+#ifdef __AVX2__
+        __m256 vdot = _mm256_setzero_ps(), vna = _mm256_setzero_ps(), vnb = _mm256_setzero_ps();
+        size_t i = 0;
+        for (; i + 8 <= dim; i += 8) {
+            __m256 va = _mm256_loadu_ps(a + i);
+            __m256 vb = _mm256_loadu_ps(b + i);
+            vdot = _mm256_fmadd_ps(va, vb, vdot);
+            vna = _mm256_fmadd_ps(va, va, vna);
+            vnb = _mm256_fmadd_ps(vb, vb, vnb);
+        }
+        float td[8], tna[8], tnb[8];
+        _mm256_storeu_ps(td, vdot); _mm256_storeu_ps(tna, vna); _mm256_storeu_ps(tnb, vnb);
+        for (int j = 0; j < 8; ++j) { dot += td[j]; na += tna[j]; nb += tnb[j]; }
+        for (; i < dim; ++i) { dot += a[i]*b[i]; na += a[i]*a[i]; nb += b[i]*b[i]; }
+#else
+        for (size_t i = 0; i < dim; ++i) { dot += a[i]*b[i]; na += a[i]*a[i]; nb += b[i]*b[i]; }
+#endif
+        float denom = sqrtf(na) * sqrtf(nb);
+        return (denom > 0.0f) ? (1.0f - dot / denom) : 1.0f;
+    }
+    case GV_DISTANCE_DOT_PRODUCT:
+#ifdef __AVX2__
+        return -gv_hnsw_dot_avx2(a, b, dim);
+#else
+        { float d = 0; for (size_t i = 0; i < dim; ++i) d += a[i]*b[i]; return -d; }
+#endif
+    case GV_DISTANCE_MANHATTAN: {
+        float sum = 0.0f;
+        for (size_t i = 0; i < dim; ++i) { float d = a[i] - b[i]; sum += (d < 0) ? -d : d; }
+        return sum;
+    }
+    default:
+#ifdef __AVX2__
+        return gv_hnsw_l2_avx2(a, b, dim);
+#else
+        return gv_hnsw_l2_scalar(a, b, dim);
+#endif
+    }
+}
+
+static inline void gv_hnsw_l2_batch4(const float *x,
+                                       const float *y0, const float *y1,
+                                       const float *y2, const float *y3,
+                                       size_t dim,
+                                       float *d0, float *d1, float *d2, float *d3) {
+#ifdef __AVX2__
+    __m256 acc0 = _mm256_setzero_ps();
+    __m256 acc1 = _mm256_setzero_ps();
+    __m256 acc2 = _mm256_setzero_ps();
+    __m256 acc3 = _mm256_setzero_ps();
+    size_t i = 0;
+    for (; i + 8 <= dim; i += 8) {
+        __m256 vx = _mm256_loadu_ps(x + i);
+        __m256 v0 = _mm256_sub_ps(vx, _mm256_loadu_ps(y0 + i));
+        __m256 v1 = _mm256_sub_ps(vx, _mm256_loadu_ps(y1 + i));
+        __m256 v2 = _mm256_sub_ps(vx, _mm256_loadu_ps(y2 + i));
+        __m256 v3 = _mm256_sub_ps(vx, _mm256_loadu_ps(y3 + i));
+        acc0 = _mm256_fmadd_ps(v0, v0, acc0);
+        acc1 = _mm256_fmadd_ps(v1, v1, acc1);
+        acc2 = _mm256_fmadd_ps(v2, v2, acc2);
+        acc3 = _mm256_fmadd_ps(v3, v3, acc3);
+    }
+    float t0[8], t1[8], t2[8], t3[8];
+    _mm256_storeu_ps(t0, acc0); _mm256_storeu_ps(t1, acc1);
+    _mm256_storeu_ps(t2, acc2); _mm256_storeu_ps(t3, acc3);
+    *d0 = t0[0]+t0[1]+t0[2]+t0[3]+t0[4]+t0[5]+t0[6]+t0[7];
+    *d1 = t1[0]+t1[1]+t1[2]+t1[3]+t1[4]+t1[5]+t1[6]+t1[7];
+    *d2 = t2[0]+t2[1]+t2[2]+t2[3]+t2[4]+t2[5]+t2[6]+t2[7];
+    *d3 = t3[0]+t3[1]+t3[2]+t3[3]+t3[4]+t3[5]+t3[6]+t3[7];
+    for (; i < dim; ++i) {
+        float q0 = x[i]-y0[i], q1 = x[i]-y1[i], q2 = x[i]-y2[i], q3 = x[i]-y3[i];
+        *d0 += q0*q0; *d1 += q1*q1; *d2 += q2*q2; *d3 += q3*q3;
+    }
+#else
+    *d0 = *d1 = *d2 = *d3 = 0.0f;
+    for (size_t i = 0; i < dim; ++i) {
+        float q0 = x[i]-y0[i], q1 = x[i]-y1[i], q2 = x[i]-y2[i], q3 = x[i]-y3[i];
+        *d0 += q0*q0; *d1 += q1*q1; *d2 += q2*q2; *d3 += q3*q3;
+    }
+#endif
+}
+
+static inline void prefetch_L2(const void *addr) {
+#if defined(__SSE4_2__) || defined(__AVX2__)
+    _mm_prefetch((const char *)addr, _MM_HINT_T1);
+#else
+    (void)addr;
+#endif
 }
 
 void *gv_hnsw_create(size_t dimension, const GV_HNSWConfig *config, GV_SoAStorage *soa_storage) {
-    if (dimension == 0) {
-        return NULL;
-    }
+    if (dimension == 0) return NULL;
 
-    GV_HNSWIndex *index = (GV_HNSWIndex *)malloc(sizeof(GV_HNSWIndex));
-    if (index == NULL) {
-        return NULL;
-    }
+    GV_HNSWIndex *index = (GV_HNSWIndex *)calloc(1, sizeof(GV_HNSWIndex));
+    if (!index) return NULL;
 
     index->dimension = dimension;
     index->M = (config && config->M > 0) ? config->M : 16;
@@ -169,1143 +318,1124 @@ void *gv_hnsw_create(size_t dimension, const GV_HNSWConfig *config, GV_SoAStorag
     index->quant_rerank = (config && config->quant_rerank > 0) ? config->quant_rerank : 0;
     index->use_acorn = (config && config->use_acorn) ? 1 : 0;
     index->acorn_hops = (config && config->acorn_hops > 0 && config->acorn_hops <= 2) ? config->acorn_hops : 1;
-    index->entryPoint = NULL;
+    index->distance_type = config ? config->distance_type : GV_DISTANCE_EUCLIDEAN;
+    index->entry_point = SIZE_MAX;
     index->count = 0;
     index->nodes_capacity = 1024;
-    index->nodes = (GV_HNSWNode **)malloc(index->nodes_capacity * sizeof(GV_HNSWNode *));
-    if (index->nodes == NULL) {
-        free(index);
+
+    index->nodes = (GV_HNSWNode *)calloc(index->nodes_capacity, sizeof(GV_HNSWNode));
+    if (!index->nodes) { free(index); return NULL; }
+
+    index->max_level_alloc = index->maxLevel + 1;
+    index->cum_nb_per_level = (size_t *)calloc(index->max_level_alloc + 1, sizeof(size_t));
+    if (!index->cum_nb_per_level) { free(index->nodes); free(index); return NULL; }
+    build_cum_nb_per_level(index);
+
+    size_t nb_per_node_l0 = 2 * index->M;
+    index->neighbors_capacity = index->nodes_capacity * nb_per_node_l0;
+    index->neighbors_size = 0;
+    index->neighbors = (int32_t *)malloc(index->neighbors_capacity * sizeof(int32_t));
+    index->offsets = (size_t *)calloc(index->nodes_capacity, sizeof(size_t));
+    if (!index->neighbors || !index->offsets) {
+        free(index->neighbors); free(index->offsets);
+        free(index->cum_nb_per_level); free(index->nodes); free(index);
+        return NULL;
+    }
+    memset(index->neighbors, 0xFF, index->neighbors_capacity * sizeof(int32_t));
+
+    if (soa_storage) {
+        index->soa_storage = soa_storage;
+        index->soa_storage_owned = 0;
+    } else {
+        index->soa_storage = gv_soa_storage_create(dimension, 1024);
+        if (!index->soa_storage) {
+            free(index->neighbors); free(index->offsets);
+            free(index->cum_nb_per_level); free(index->nodes); free(index);
+            return NULL;
+        }
+        index->soa_storage_owned = 1;
+    }
+
+    index->visited_capacity = index->nodes_capacity;
+    index->visited_epoch = (uint32_t *)calloc(index->visited_capacity, sizeof(uint32_t));
+    if (!index->visited_epoch) {
+        if (index->soa_storage_owned) gv_soa_storage_destroy(index->soa_storage);
+        free(index->neighbors); free(index->offsets);
+        free(index->cum_nb_per_level); free(index->nodes); free(index);
+        return NULL;
+    }
+    index->current_epoch = 0;
+
+    index->search_buf_size = 2 * index->efSearch;
+    index->search_dis = (float *)malloc(index->search_buf_size * sizeof(float));
+    index->search_ids = (size_t *)malloc(index->search_buf_size * sizeof(size_t));
+    index->search_proc = (uint8_t *)malloc(index->search_buf_size * sizeof(uint8_t));
+    if (!index->search_dis || !index->search_ids || !index->search_proc) {
+        free(index->search_dis); free(index->search_ids); free(index->search_proc);
+        free(index->visited_epoch);
+        if (index->soa_storage_owned) gv_soa_storage_destroy(index->soa_storage);
+        free(index->neighbors); free(index->offsets);
+        free(index->cum_nb_per_level); free(index->nodes); free(index);
         return NULL;
     }
 
-    if (soa_storage != NULL) {
-        index->soa_storage = soa_storage;
-        index->soa_storage_owned = 0;  /* Shared storage, don't destroy */
-    } else {
-        index->soa_storage = gv_soa_storage_create(dimension, 1024);
-        if (index->soa_storage == NULL) {
-            free(index->nodes);
-            free(index);
-            return NULL;
-        }
-        index->soa_storage_owned = 1;  /* We own it, should destroy */
+    index->insert_buf_size = index->efConstruction;
+    index->insert_dis = (float *)malloc(index->insert_buf_size * sizeof(float));
+    index->insert_ids = (size_t *)malloc(index->insert_buf_size * sizeof(size_t));
+    index->insert_proc = (uint8_t *)malloc(index->insert_buf_size * sizeof(uint8_t));
+    if (!index->insert_dis || !index->insert_ids || !index->insert_proc) {
+        free(index->insert_dis); free(index->insert_ids); free(index->insert_proc);
+        free(index->search_dis); free(index->search_ids); free(index->search_proc);
+        free(index->visited_epoch);
+        if (index->soa_storage_owned) gv_soa_storage_destroy(index->soa_storage);
+        free(index->neighbors); free(index->offsets);
+        free(index->cum_nb_per_level); free(index->nodes); free(index);
+        return NULL;
     }
 
     return index;
 }
 
-int gv_hnsw_insert(void *index_ptr, GV_Vector *vector) {
-    if (index_ptr == NULL || vector == NULL) {
-        return -1;
-    }
-
+int gv_hnsw_reserve(void *index_ptr, size_t n) {
+    if (!index_ptr || n == 0) return -1;
     GV_HNSWIndex *index = (GV_HNSWIndex *)index_ptr;
-    if (vector->dimension != index->dimension) {
-        return -1;
-    }
+    size_t total = index->count + n;
 
-    /* Add vector to SoA storage */
-    /* Transfer metadata ownership to SoA storage */
-    GV_Metadata *metadata = vector->metadata;
-    vector->metadata = NULL;  /* Clear from original vector to transfer ownership */
-    size_t vector_index = gv_soa_storage_add(index->soa_storage, vector->data, metadata);
-    if (vector_index == (size_t)-1) {
-        /* Restore metadata if add failed */
-        vector->metadata = metadata;
-        return -1;
-    }
-
-    size_t level = calculate_level(index->maxLevel);
-    GV_HNSWNode *new_node = (GV_HNSWNode *)malloc(sizeof(GV_HNSWNode));
-    if (new_node == NULL) {
-        gv_soa_storage_mark_deleted(index->soa_storage, vector_index);
-        return -1;
-    }
-
-    new_node->vector_index = vector_index;
-    new_node->binary_vector = NULL;
-    new_node->level = level;
-    new_node->deleted = 0;
-    new_node->neighbors = (GV_HNSWNode ***)malloc((level + 1) * sizeof(GV_HNSWNode **));
-    new_node->neighbor_counts = (size_t *)calloc(level + 1, sizeof(size_t));
-    if (new_node->neighbors == NULL || new_node->neighbor_counts == NULL) {
-        free(new_node->neighbors);
-        free(new_node->neighbor_counts);
-        free(new_node);
-        gv_soa_storage_mark_deleted(index->soa_storage, vector_index);
-        return -1;
-    }
-
-    if (index->use_binary_quant) {
-        const float *vector_data = gv_soa_storage_get_data(index->soa_storage, vector_index);
-        if (vector_data == NULL) {
-            for (size_t l = 0; l <= level; ++l) {
-                free(new_node->neighbors[l]);
-            }
-            free(new_node->neighbors);
-            free(new_node->neighbor_counts);
-            free(new_node);
-            return -1;
-        }
-        new_node->binary_vector = gv_binary_quantize(vector_data, vector->dimension);
-        if (new_node->binary_vector == NULL) {
-            for (size_t l = 0; l <= level; ++l) {
-                free(new_node->neighbors[l]);
-            }
-            free(new_node->neighbors);
-            free(new_node->neighbor_counts);
-            free(new_node);
-            return -1;
-        }
-    }
-
-    for (size_t l = 0; l <= level; ++l) {
-        new_node->neighbors[l] = (GV_HNSWNode **)malloc(index->M * sizeof(GV_HNSWNode *));
-        if (new_node->neighbors[l] == NULL) {
-            for (size_t i = 0; i < l; ++i) {
-                free(new_node->neighbors[i]);
-            }
-            free(new_node->neighbors);
-            free(new_node->neighbor_counts);
-            free(new_node);
-            return -1;
-        }
-        new_node->neighbor_counts[l] = 0;
-    }
-
-    GV_HNSWNode *old_entry = index->entryPoint;
-    if (index->entryPoint == NULL) {
-        index->entryPoint = new_node;
-    } else if (level > index->entryPoint->level) {
-        index->entryPoint = new_node;
-    }
-
-    if (index->count >= index->nodes_capacity) {
-        size_t new_capacity = index->nodes_capacity * 2;
-        GV_HNSWNode **new_nodes = (GV_HNSWNode **)realloc(index->nodes, 
-                                                           new_capacity * sizeof(GV_HNSWNode *));
-        if (new_nodes == NULL) {
-            gv_hnsw_node_destroy(new_node);
-            return -1;
-        }
+    /* Grow nodes + offsets */
+    if (total > index->nodes_capacity) {
+        size_t new_cap = total + (total >> 2); /* 25% headroom */
+        GV_HNSWNode *new_nodes = (GV_HNSWNode *)realloc(index->nodes, new_cap * sizeof(GV_HNSWNode));
+        if (!new_nodes) return -1;
+        memset(new_nodes + index->nodes_capacity, 0, (new_cap - index->nodes_capacity) * sizeof(GV_HNSWNode));
         index->nodes = new_nodes;
-        index->nodes_capacity = new_capacity;
+
+        size_t *new_off = (size_t *)realloc(index->offsets, new_cap * sizeof(size_t));
+        if (!new_off) return -1;
+        index->offsets = new_off;
+
+        index->nodes_capacity = new_cap;
     }
 
-    new_node->index = index->count;
-    index->nodes[index->count++] = new_node;
-
-    if (index->count == 1) {
-        return 0;
+    /* Grow visited_epoch */
+    if (total > index->visited_capacity) {
+        size_t new_cap = total + (total >> 2);
+        uint32_t *new_vis = (uint32_t *)realloc(index->visited_epoch, new_cap * sizeof(uint32_t));
+        if (!new_vis) return -1;
+        memset(new_vis + index->visited_capacity, 0, (new_cap - index->visited_capacity) * sizeof(uint32_t));
+        index->visited_epoch = new_vis;
+        index->visited_capacity = new_cap;
     }
 
-    const float *new_vector_data = gv_soa_storage_get_data(index->soa_storage, vector_index);
-    if (new_vector_data == NULL) {
-        return -1;
+    /* Pre-allocate neighbor slots: most nodes will be level 0 (2*M slots each).
+     * Higher levels are rare, so we under-estimate slightly. */
+    size_t nb_per_node = 2 * index->M; /* level 0 */
+    size_t nb_needed = index->neighbors_size + n * nb_per_node;
+    if (nb_needed > index->neighbors_capacity) {
+        size_t new_cap = nb_needed + (nb_needed >> 2);
+        int32_t *new_nb = (int32_t *)realloc(index->neighbors, new_cap * sizeof(int32_t));
+        if (!new_nb) return -1;
+        memset(new_nb + index->neighbors_capacity, 0xFF, (new_cap - index->neighbors_capacity) * sizeof(int32_t));
+        index->neighbors = new_nb;
+        index->neighbors_capacity = new_cap;
     }
 
-    /* Use old entry point for greedy descent so the new entry (if changed)
-       doesn't start from itself with an empty neighbor list. */
-    GV_HNSWNode *current = old_entry;
-    if (current == NULL) {
-        return 0;
-    }
-    
-    size_t currentLevel = current->level;
-    if (currentLevel > index->maxLevel) {
-        currentLevel = index->maxLevel;
-    }
-
-    for (int lc = (int)currentLevel; lc > (int)level; --lc) {
-        if (current == NULL || (size_t)lc > current->level) continue;
-
-        /* Greedy walk at this layer until no closer neighbor found */
-        const float *cur_data = gv_soa_storage_get_data(index->soa_storage, current->vector_index);
-        float cur_dist = FLT_MAX;
-        if (cur_data != NULL) {
-            cur_dist = 0.0f;
-            for (size_t d = 0; d < index->dimension; ++d) {
-                float diff = new_vector_data[d] - cur_data[d];
-                cur_dist += diff * diff;
-            }
+    /* Pre-allocate SoA storage */
+    if (index->soa_storage_owned && index->soa_storage) {
+        GV_SoAStorage *s = index->soa_storage;
+        if (total > s->capacity) {
+            size_t new_cap = total + (total >> 2);
+            float *new_data = (float *)realloc(s->data, new_cap * s->dimension * sizeof(float));
+            if (!new_data) return -1;
+            s->data = new_data;
+            GV_Metadata **new_meta = (GV_Metadata **)realloc(s->metadata, new_cap * sizeof(GV_Metadata *));
+            if (!new_meta) return -1;
+            memset(new_meta + s->capacity, 0, (new_cap - s->capacity) * sizeof(GV_Metadata *));
+            s->metadata = new_meta;
+            int *new_del = (int *)realloc(s->deleted, new_cap * sizeof(int));
+            if (!new_del) return -1;
+            memset(new_del + s->capacity, 0, (new_cap - s->capacity) * sizeof(int));
+            s->deleted = new_del;
+            s->capacity = new_cap;
         }
-
-        int improved = 1;
-        while (improved) {
-            improved = 0;
-            if (current->neighbor_counts == NULL || current->neighbors == NULL ||
-                (size_t)lc > current->level || current->neighbor_counts[lc] == 0 ||
-                current->neighbors[lc] == NULL) {
-                break;
-            }
-            for (size_t i = 0; i < current->neighbor_counts[lc]; ++i) {
-                GV_HNSWNode *nb = current->neighbors[lc][i];
-                if (nb == NULL || nb->deleted != 0) continue;
-                const float *nb_data = gv_soa_storage_get_data(index->soa_storage, nb->vector_index);
-                if (nb_data == NULL) continue;
-                float dist = 0.0f;
-                for (size_t d = 0; d < index->dimension; ++d) {
-                    float diff = new_vector_data[d] - nb_data[d];
-                    dist += diff * diff;
-                }
-                if (dist < cur_dist) {
-                    cur_dist = dist;
-                    current = nb;
-                    improved = 1;
-                }
-            }
-        }
-        currentLevel = current->level;
-        if (currentLevel > index->maxLevel) {
-            currentLevel = index->maxLevel;
-        }
-    }
-    
-    if (current == NULL) {
-        return 0;
-    }
-
-    size_t searchLevel = (currentLevel < level ? currentLevel : level);
-    if (searchLevel > current->level) {
-        searchLevel = current->level;
-    }
-    if (searchLevel > new_node->level) {
-        searchLevel = new_node->level;
-    }
-    
-    for (int lc = (int)searchLevel; lc >= 0; --lc) {
-        if (current == NULL || new_node == NULL ||
-            (size_t)lc > current->level || (size_t)lc > new_node->level) {
-            continue;
-        }
-
-        GV_HNSWCandidate *candidates = (GV_HNSWCandidate *)malloc(index->efConstruction * sizeof(GV_HNSWCandidate));
-        if (candidates == NULL) continue;
-
-        int *insert_visited = (int *)calloc(index->count, sizeof(int));
-        if (insert_visited == NULL) {
-            free(candidates);
-            continue;
-        }
-        /* Mark the new node as visited so it won't be added as candidate */
-        insert_visited[new_node->index] = 1;
-
-        size_t candidate_count = 0;
-        const float *current_data = gv_soa_storage_get_data(index->soa_storage, current->vector_index);
-        if (current_data != NULL) {
-            candidates[candidate_count].node = current;
-            float dist = 0.0f;
-            for (size_t d = 0; d < index->dimension; ++d) {
-                float diff = new_vector_data[d] - current_data[d];
-                dist += diff * diff;
-            }
-            candidates[candidate_count++].distance = dist;
-            insert_visited[current->index] = 1;
-        }
-
-        /* Greedy expansion using efConstruction.
-           Use a processed-flag approach so newly inserted closer
-           candidates are always explored next. */
-        int *processed = (int *)calloc(index->efConstruction, sizeof(int));
-        if (processed == NULL) {
-            free(insert_visited);
-            free(candidates);
-            continue;
-        }
-
-        for (;;) {
-            /* Find closest unprocessed candidate */
-            size_t best = (size_t)-1;
-            for (size_t ci = 0; ci < candidate_count; ++ci) {
-                if (!processed[ci]) {
-                    best = ci;
-                    break;  /* list is sorted, first unprocessed is closest */
-                }
-            }
-            if (best == (size_t)-1) break;
-
-            GV_HNSWNode *cand = candidates[best].node;
-            float cand_dist = candidates[best].distance;
-            processed[best] = 1;
-
-            if (cand == NULL || cand->neighbor_counts == NULL || cand->neighbors == NULL ||
-                (size_t)lc > cand->level || cand->neighbor_counts[lc] == 0 ||
-                cand->neighbors[lc] == NULL) {
-                continue;
-            }
-
-            /* Terminate if this candidate is worse than the worst in a full list */
-            if (candidate_count >= index->efConstruction &&
-                cand_dist > candidates[candidate_count - 1].distance) {
-                break;
-            }
-
-            for (size_t i = 0; i < cand->neighbor_counts[lc]; ++i) {
-                GV_HNSWNode *nb = cand->neighbors[lc][i];
-                if (nb == NULL || nb->deleted != 0) continue;
-                if (nb->index >= index->count || insert_visited[nb->index]) continue;
-                insert_visited[nb->index] = 1;
-
-                const float *nb_data = gv_soa_storage_get_data(index->soa_storage, nb->vector_index);
-                if (nb_data == NULL) continue;
-                float dist = 0.0f;
-                for (size_t d = 0; d < index->dimension; ++d) {
-                    float diff = new_vector_data[d] - nb_data[d];
-                    dist += diff * diff;
-                }
-
-                if (candidate_count < index->efConstruction) {
-                    size_t pos = candidate_count++;
-                    candidates[pos].node = nb;
-                    candidates[pos].distance = dist;
-                    /* Insertion sort into sorted position */
-                    while (pos > 0 && candidates[pos].distance < candidates[pos - 1].distance) {
-                        GV_HNSWCandidate tmp = candidates[pos];
-                        int ptmp = processed[pos];
-                        candidates[pos] = candidates[pos - 1];
-                        processed[pos] = processed[pos - 1];
-                        candidates[pos - 1] = tmp;
-                        processed[pos - 1] = ptmp;
-                        pos--;
-                    }
-                } else if (dist < candidates[candidate_count - 1].distance) {
-                    size_t pos = candidate_count - 1;
-                    candidates[pos].node = nb;
-                    candidates[pos].distance = dist;
-                    processed[pos] = 0;
-                    while (pos > 0 && candidates[pos].distance < candidates[pos - 1].distance) {
-                        GV_HNSWCandidate tmp = candidates[pos];
-                        int ptmp = processed[pos];
-                        candidates[pos] = candidates[pos - 1];
-                        processed[pos] = processed[pos - 1];
-                        candidates[pos - 1] = tmp;
-                        processed[pos - 1] = ptmp;
-                        pos--;
-                    }
-                }
-            }
-        }
-        free(processed);
-
-        free(insert_visited);
-
-        if (candidate_count == 0) {
-            free(candidates);
-            continue;
-        }
-
-        size_t selected_count = (candidate_count < index->M) ? candidate_count : index->M;
-        for (size_t i = 0; i < selected_count; ++i) {
-            if (candidates[i].node == NULL || candidates[i].node == new_node || candidates[i].node->deleted != 0) continue;
-            if (candidates[i].node->neighbors == NULL || candidates[i].node->neighbor_counts == NULL) continue;
-
-            /* Connect new_node -> candidate */
-            if ((size_t)lc <= new_node->level && new_node->neighbor_counts != NULL &&
-                new_node->neighbors != NULL && new_node->neighbor_counts[lc] < index->M &&
-                new_node->neighbors[lc] != NULL) {
-                new_node->neighbors[lc][new_node->neighbor_counts[lc]++] = candidates[i].node;
-            }
-
-            /* Connect candidate -> new_node (with pruning if full) */
-            if ((size_t)lc <= candidates[i].node->level &&
-                candidates[i].node->neighbors[lc] != NULL) {
-                GV_HNSWNode *cnode = candidates[i].node;
-                if (cnode->neighbor_counts[lc] < index->M) {
-                    cnode->neighbors[lc][cnode->neighbor_counts[lc]++] = new_node;
-                } else {
-                    /* Neighbor list full — replace worst neighbor if new_node is closer */
-                    const float *cnode_data = gv_soa_storage_get_data(index->soa_storage, cnode->vector_index);
-                    if (cnode_data != NULL) {
-                        float new_dist = 0.0f;
-                        for (size_t d = 0; d < index->dimension; ++d) {
-                            float diff = new_vector_data[d] - cnode_data[d];
-                            new_dist += diff * diff;
-                        }
-                        /* Find worst (farthest) neighbor */
-                        size_t worst_idx = 0;
-                        float worst_dist = 0.0f;
-                        for (size_t ni = 0; ni < cnode->neighbor_counts[lc]; ++ni) {
-                            if (cnode->neighbors[lc][ni] == NULL || cnode->neighbors[lc][ni]->deleted) {
-                                worst_idx = ni;
-                                worst_dist = FLT_MAX;
-                                break;
-                            }
-                            const float *nb_data = gv_soa_storage_get_data(index->soa_storage, cnode->neighbors[lc][ni]->vector_index);
-                            if (nb_data == NULL) {
-                                worst_idx = ni;
-                                worst_dist = FLT_MAX;
-                                break;
-                            }
-                            float nb_dist = 0.0f;
-                            for (size_t d = 0; d < index->dimension; ++d) {
-                                float diff = cnode_data[d] - nb_data[d];
-                                nb_dist += diff * diff;
-                            }
-                            if (nb_dist > worst_dist) {
-                                worst_dist = nb_dist;
-                                worst_idx = ni;
-                            }
-                        }
-                        if (new_dist < worst_dist) {
-                            cnode->neighbors[lc][worst_idx] = new_node;
-                        }
-                    }
-                }
-            }
-        }
-
-        free(candidates);
     }
 
     return 0;
 }
 
-int gv_hnsw_search(void *index_ptr, const GV_Vector *query, size_t k,
-                   GV_SearchResult *results, GV_DistanceType distance_type,
-                   const char *filter_key, const char *filter_value) {
-    if (index_ptr == NULL || query == NULL || results == NULL || k == 0) {
+static int alloc_node_neighbors(GV_HNSWIndex *index, size_t node_idx, size_t level) {
+    size_t slots_needed = nb_slots_for_level(index, level);
+    size_t offset = index->neighbors_size;
+    size_t new_size = offset + slots_needed;
+
+    /* Amortized growth: double capacity when exceeded */
+    if (new_size > index->neighbors_capacity) {
+        size_t new_cap = index->neighbors_capacity * 2;
+        if (new_cap < new_size) new_cap = new_size;
+        int32_t *new_nb = (int32_t *)realloc(index->neighbors, new_cap * sizeof(int32_t));
+        if (!new_nb) return -1;
+        /* Fill new capacity with -1 sentinel */
+        memset(new_nb + index->neighbors_capacity, 0xFF, (new_cap - index->neighbors_capacity) * sizeof(int32_t));
+        index->neighbors = new_nb;
+        index->neighbors_capacity = new_cap;
+    }
+
+    index->offsets[node_idx] = offset;
+    index->neighbors_size = new_size;
+    return 0;
+}
+
+static void add_link(GV_HNSWIndex *index, size_t from, size_t to, size_t level,
+                      const float *soa_base, size_t soa_dim) {
+    int32_t *start = nb_begin(index, from, level);
+    size_t max_n = max_nb_at_level(index, level);
+
+    for (size_t i = 0; i < max_n; ++i) {
+        if (start[i] < 0) {
+            start[i] = (int32_t)to;
+            return;
+        }
+    }
+
+    #define LINK_VEC(vidx) (soa_base + (vidx) * soa_dim)
+    const float *from_data = LINK_VEC(index->nodes[from].vector_index);
+    float new_dist = gv_hnsw_raw_distance(from_data, LINK_VEC(index->nodes[to].vector_index),
+                                            soa_dim, index->distance_type);
+
+    float worst_dist = -1.0f;
+    size_t worst_i = 0;
+
+    if (index->distance_type == GV_DISTANCE_EUCLIDEAN && max_n >= 4) {
+        const float *bp[4];
+        size_t bi_arr[4];
+        size_t bi = 0;
+        for (size_t i = 0; i < max_n; ++i) {
+            int32_t nb = start[i];
+            if (nb < 0 || index->nodes[nb].deleted) {
+                start[i] = (int32_t)to;
+                goto add_link_done;
+            }
+            bp[bi] = LINK_VEC(index->nodes[nb].vector_index);
+            bi_arr[bi] = i;
+            bi++;
+            if (bi == 4) {
+                float d0, d1, d2, d3;
+                gv_hnsw_l2_batch4(from_data, bp[0], bp[1], bp[2], bp[3], soa_dim, &d0, &d1, &d2, &d3);
+                float dd[4] = {d0, d1, d2, d3};
+                for (int r = 0; r < 4; r++) {
+                    if (dd[r] > worst_dist) { worst_dist = dd[r]; worst_i = bi_arr[r]; }
+                }
+                bi = 0;
+            }
+        }
+        for (size_t r = 0; r < bi; ++r) {
+            float d = gv_hnsw_raw_distance(from_data, bp[r], soa_dim, index->distance_type);
+            if (d > worst_dist) { worst_dist = d; worst_i = bi_arr[r]; }
+        }
+    } else {
+        for (size_t i = 0; i < max_n; ++i) {
+            int32_t nb = start[i];
+            if (nb < 0 || index->nodes[nb].deleted) {
+                start[i] = (int32_t)to;
+                goto add_link_done;
+            }
+            float d = gv_hnsw_raw_distance(from_data, LINK_VEC(index->nodes[nb].vector_index),
+                                             soa_dim, index->distance_type);
+            if (d > worst_dist) { worst_dist = d; worst_i = i; }
+        }
+    }
+
+    if (new_dist < worst_dist) {
+        start[worst_i] = (int32_t)to;
+    }
+add_link_done:
+    #undef LINK_VEC
+    (void)0;
+}
+
+static inline void heap_sift_up(float *dis, size_t *ids, uint8_t *proc, size_t i) {
+    float val = dis[i];
+    size_t id = ids[i];
+    uint8_t p = proc[i];
+    while (i > 0) {
+        size_t parent = (i - 1) >> 1;
+        if (dis[parent] >= val) break;
+        dis[i] = dis[parent]; ids[i] = ids[parent]; proc[i] = proc[parent];
+        i = parent;
+    }
+    dis[i] = val; ids[i] = id; proc[i] = p;
+}
+
+static inline void heap_sift_down(float *dis, size_t *ids, uint8_t *proc, size_t k, size_t i) {
+    float val = dis[i];
+    size_t id = ids[i];
+    uint8_t p = proc[i];
+    while (1) {
+        size_t c1 = 2 * i + 1;
+        size_t c2 = c1 + 1;
+        if (c1 >= k) break;
+        size_t larger = (c2 < k && dis[c2] > dis[c1]) ? c2 : c1;
+        if (val >= dis[larger]) break;
+        dis[i] = dis[larger]; ids[i] = ids[larger]; proc[i] = proc[larger];
+        i = larger;
+    }
+    dis[i] = val; ids[i] = id; proc[i] = p;
+}
+
+static inline int mmheap_push(float *dis, size_t *ids, uint8_t *proc,
+                               size_t *k, size_t capacity,
+                               size_t node_idx, float dist) {
+    if (*k < capacity) {
+        dis[*k] = dist;
+        ids[*k] = node_idx;
+        proc[*k] = 0;
+        heap_sift_up(dis, ids, proc, *k);
+        (*k)++;
+        return 1;
+    } else if (dist < dis[0]) {
+        dis[0] = dist;
+        ids[0] = node_idx;
+        proc[0] = 0;
+        heap_sift_down(dis, ids, proc, *k, 0);
+        return 1;
+    }
+    return 0;
+}
+
+static inline size_t mmheap_pop_min(float *dis, size_t *ids, uint8_t *proc,
+                                     size_t k, float *out_dist) {
+    float best_dist = FLT_MAX;
+    size_t best_pos = SIZE_MAX;
+
+#ifdef __AVX2__
+    __m256 vmin = _mm256_set1_ps(FLT_MAX);
+    __m256i vmin_idx = _mm256_set1_epi32(-1);
+    __m256i vbase = _mm256_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7);
+    __m256i vstep = _mm256_set1_epi32(8);
+
+    size_t i = 0;
+    for (; i + 8 <= k; i += 8) {
+        __m256 vdis = _mm256_loadu_ps(dis + i);
+        uint64_t proc8;
+        memcpy(&proc8, proc + i, 8);
+        __m256i vproc32 = _mm256_setr_epi32(
+            (proc8 >>  0) & 0xFF, (proc8 >>  8) & 0xFF,
+            (proc8 >> 16) & 0xFF, (proc8 >> 24) & 0xFF,
+            (proc8 >> 32) & 0xFF, (proc8 >> 40) & 0xFF,
+            (proc8 >> 48) & 0xFF, (proc8 >> 56) & 0xFF);
+        __m256i proc_mask = _mm256_cmpeq_epi32(vproc32, _mm256_setzero_si256());
+        __m256 masked_dis = _mm256_blendv_ps(_mm256_set1_ps(FLT_MAX), vdis,
+                                              _mm256_castsi256_ps(proc_mask));
+        __m256 cmp = _mm256_cmp_ps(masked_dis, vmin, _CMP_LT_OS);
+        vmin = _mm256_blendv_ps(vmin, masked_dis, cmp);
+        vmin_idx = _mm256_castps_si256(
+            _mm256_blendv_ps(_mm256_castsi256_ps(vmin_idx),
+                             _mm256_castsi256_ps(vbase), cmp));
+        vbase = _mm256_add_epi32(vbase, vstep);
+    }
+    float lane_dis[8]; int32_t lane_idx[8];
+    _mm256_storeu_ps(lane_dis, vmin);
+    _mm256_storeu_si256((__m256i *)lane_idx, vmin_idx);
+    for (int j = 0; j < 8; j++) {
+        if (lane_dis[j] < best_dist) {
+            best_dist = lane_dis[j];
+            best_pos = (size_t)lane_idx[j];
+        }
+    }
+    for (; i < k; ++i) {
+        if (!proc[i] && dis[i] < best_dist) {
+            best_dist = dis[i];
+            best_pos = i;
+        }
+    }
+#else
+    for (size_t i = 0; i < k; ++i) {
+        if (!proc[i] && dis[i] < best_dist) {
+            best_dist = dis[i];
+            best_pos = i;
+        }
+    }
+#endif
+
+    if (best_pos == SIZE_MAX) return SIZE_MAX;
+    proc[best_pos] = 1;
+    *out_dist = best_dist;
+    return ids[best_pos];
+}
+
+static int hnsw_insert_impl(GV_HNSWIndex *index, size_t vector_index, size_t dimension);
+
+int gv_hnsw_insert(void *index_ptr, GV_Vector *vector) {
+    if (!index_ptr || !vector) return -1;
+    GV_HNSWIndex *index = (GV_HNSWIndex *)index_ptr;
+    if (vector->dimension != index->dimension) return -1;
+
+    GV_Metadata *metadata = vector->metadata;
+    vector->metadata = NULL;
+    size_t vector_index = gv_soa_storage_add(index->soa_storage, vector->data, metadata);
+    if (vector_index == (size_t)-1) { vector->metadata = metadata; return -1; }
+
+    return hnsw_insert_impl(index, vector_index, vector->dimension);
+}
+
+static int hnsw_insert_impl(GV_HNSWIndex *index, size_t vector_index, size_t dimension) {
+    size_t level = calculate_level(index->maxLevel, index->M);
+    size_t node_idx = index->count;
+
+    if (node_idx >= index->nodes_capacity) {
+        size_t new_cap = index->nodes_capacity * 2;
+        GV_HNSWNode *new_nodes = (GV_HNSWNode *)realloc(index->nodes, new_cap * sizeof(GV_HNSWNode));
+        if (!new_nodes) { gv_soa_storage_mark_deleted(index->soa_storage, vector_index); return -1; }
+        index->nodes = new_nodes;
+        memset(index->nodes + index->nodes_capacity, 0, (new_cap - index->nodes_capacity) * sizeof(GV_HNSWNode));
+
+        size_t *new_off = (size_t *)realloc(index->offsets, new_cap * sizeof(size_t));
+        if (!new_off) { gv_soa_storage_mark_deleted(index->soa_storage, vector_index); return -1; }
+        index->offsets = new_off;
+
+        uint32_t *new_vis = (uint32_t *)realloc(index->visited_epoch, new_cap * sizeof(uint32_t));
+        if (!new_vis) { gv_soa_storage_mark_deleted(index->soa_storage, vector_index); return -1; }
+        memset(new_vis + index->visited_capacity, 0, (new_cap - index->visited_capacity) * sizeof(uint32_t));
+        index->visited_epoch = new_vis;
+        index->visited_capacity = new_cap;
+        index->nodes_capacity = new_cap;
+    }
+
+    index->nodes[node_idx].vector_index = vector_index;
+    index->nodes[node_idx].binary_vector = NULL;
+    index->nodes[node_idx].level = level;
+    index->nodes[node_idx].deleted = 0;
+
+    if (index->use_binary_quant) {
+        const float *vd = gv_soa_storage_get_data(index->soa_storage, vector_index);
+        if (vd) index->nodes[node_idx].binary_vector = gv_binary_quantize(vd, dimension);
+    }
+
+    if (alloc_node_neighbors(index, node_idx, level) != 0) {
+        gv_soa_storage_mark_deleted(index->soa_storage, vector_index);
         return -1;
     }
 
-    GV_HNSWIndex *index = (GV_HNSWIndex *)index_ptr;
-    if (query->dimension != index->dimension || index->entryPoint == NULL) {
-        return 0;
+    size_t old_entry = index->entry_point;
+    if (index->entry_point == SIZE_MAX) {
+        index->entry_point = node_idx;
+    } else if (level > index->nodes[index->entry_point].level) {
+        index->entry_point = node_idx;
     }
+
+    index->count = node_idx + 1;
+
+    if (node_idx == 0) return 0;
+
+    const float *soa_base = index->soa_storage->data;
+    const size_t soa_dim = index->dimension;
+    #define SOA_VEC_IMPL(vidx) (soa_base + (vidx) * soa_dim)
+
+    const float *new_vec = SOA_VEC_IMPL(vector_index);
+
+    size_t cur = old_entry;
+    if (cur == SIZE_MAX) goto insert_impl_done;
+
+    size_t curLevel = index->nodes[cur].level;
+    if (curLevel > index->maxLevel) curLevel = index->maxLevel;
+
+    for (int lc = (int)curLevel; lc > (int)level; --lc) {
+        if ((size_t)lc > index->nodes[cur].level) continue;
+        float cur_dist = gv_hnsw_raw_distance(new_vec, SOA_VEC_IMPL(index->nodes[cur].vector_index), soa_dim, index->distance_type);
+
+        int improved = 1;
+        while (improved) {
+            improved = 0;
+            int32_t *nbs = nb_begin(index, cur, (size_t)lc);
+            size_t max_n = max_nb_at_level(index, (size_t)lc);
+            for (size_t i = 0; i < max_n; ++i) {
+                int32_t nb = nbs[i];
+                if (nb < 0) break;
+                if (index->nodes[nb].deleted) continue;
+                float dist = gv_hnsw_raw_distance(new_vec, SOA_VEC_IMPL(index->nodes[nb].vector_index), soa_dim, index->distance_type);
+                if (dist < cur_dist) { cur_dist = dist; cur = (size_t)nb; improved = 1; }
+            }
+        }
+        curLevel = index->nodes[cur].level;
+        if (curLevel > index->maxLevel) curLevel = index->maxLevel;
+    }
+
+    size_t searchLevel = (curLevel < level) ? curLevel : level;
+    if (searchLevel > index->nodes[cur].level) searchLevel = index->nodes[cur].level;
+    if (searchLevel > level) searchLevel = level;
+
+    for (int lc = (int)searchLevel; lc >= 0; --lc) {
+        if ((size_t)lc > index->nodes[cur].level || (size_t)lc > level) continue;
+
+        index->current_epoch++;
+        if (index->current_epoch == 0) {
+            memset(index->visited_epoch, 0, index->visited_capacity * sizeof(uint32_t));
+            index->current_epoch = 1;
+        }
+        index->visited_epoch[node_idx] = index->current_epoch;
+
+        float *heap_dis = index->insert_dis;
+        size_t *heap_ids = index->insert_ids;
+        uint8_t *heap_proc = index->insert_proc;
+        size_t heap_k = 0;
+
+        float seed_dist = gv_hnsw_raw_distance(new_vec, SOA_VEC_IMPL(index->nodes[cur].vector_index), soa_dim, index->distance_type);
+        mmheap_push(heap_dis, heap_ids, heap_proc, &heap_k, index->efConstruction, cur, seed_dist);
+        index->visited_epoch[cur] = index->current_epoch;
+
+        for (;;) {
+            float cand_dist;
+            size_t cand_node = mmheap_pop_min(heap_dis, heap_ids, heap_proc, heap_k, &cand_dist);
+            if (cand_node == SIZE_MAX) break;
+            if (index->nodes[cand_node].deleted) continue;
+            if ((size_t)lc > index->nodes[cand_node].level) continue;
+            if (heap_k >= index->efConstruction && cand_dist > heap_dis[0]) break;
+
+            int32_t *nbs = nb_begin(index, cand_node, (size_t)lc);
+            size_t max_n = max_nb_at_level(index, (size_t)lc);
+
+            size_t jmax = 0;
+            int32_t valid_nbs[64];
+            for (size_t i = 0; i < max_n; ++i) {
+                int32_t nb = nbs[i];
+                if (nb < 0) break;
+                valid_nbs[jmax] = nb;
+                prefetch_L2(&index->visited_epoch[nb]);
+                jmax++;
+            }
+
+            size_t batch_buf_idx = 0;
+            size_t batch_nodes[4];
+            const float *batch_ptrs[4];
+
+            for (size_t i = 0; i < jmax; ++i) {
+                int32_t nb = valid_nbs[i];
+                if (index->nodes[nb].deleted) continue;
+                if ((size_t)nb >= index->visited_capacity ||
+                    index->visited_epoch[nb] == index->current_epoch) continue;
+                index->visited_epoch[nb] = index->current_epoch;
+
+                if (i + 1 < jmax) {
+                    prefetch_L2(SOA_VEC_IMPL(index->nodes[valid_nbs[i+1]].vector_index));
+                }
+
+                batch_nodes[batch_buf_idx] = (size_t)nb;
+                batch_ptrs[batch_buf_idx] = SOA_VEC_IMPL(index->nodes[nb].vector_index);
+                batch_buf_idx++;
+
+                if (batch_buf_idx == 4 && index->distance_type == GV_DISTANCE_EUCLIDEAN) {
+                    float d0, d1, d2, d3;
+                    gv_hnsw_l2_batch4(new_vec, batch_ptrs[0], batch_ptrs[1],
+                                       batch_ptrs[2], batch_ptrs[3], soa_dim,
+                                       &d0, &d1, &d2, &d3);
+                    float thresh = (heap_k >= index->efConstruction) ? heap_dis[0] : FLT_MAX;
+                    if (d0 < thresh) mmheap_push(heap_dis, heap_ids, heap_proc, &heap_k, index->efConstruction, batch_nodes[0], d0);
+                    if (d1 < thresh) mmheap_push(heap_dis, heap_ids, heap_proc, &heap_k, index->efConstruction, batch_nodes[1], d1);
+                    if (d2 < thresh) mmheap_push(heap_dis, heap_ids, heap_proc, &heap_k, index->efConstruction, batch_nodes[2], d2);
+                    if (d3 < thresh) mmheap_push(heap_dis, heap_ids, heap_proc, &heap_k, index->efConstruction, batch_nodes[3], d3);
+                    batch_buf_idx = 0;
+                }
+            }
+            for (size_t r = 0; r < batch_buf_idx; ++r) {
+                float dist = gv_hnsw_raw_distance(new_vec, batch_ptrs[r], soa_dim, index->distance_type);
+                mmheap_push(heap_dis, heap_ids, heap_proc, &heap_k, index->efConstruction, batch_nodes[r], dist);
+            }
+        }
+
+        if (heap_k == 0) continue;
+
+        size_t max_nbrs = max_nb_at_level(index, (size_t)lc);
+        size_t extract_need = max_nbrs * 3;
+        if (extract_need > heap_k) extract_need = heap_k;
+
+        float tmp_dis2[512];
+        size_t tmp_ids2[512];
+        size_t copy_n = (heap_k < 512) ? heap_k : 512;
+        memcpy(tmp_dis2, heap_dis, copy_n * sizeof(float));
+        memcpy(tmp_ids2, heap_ids, copy_n * sizeof(size_t));
+
+        GV_HNSWCandidate sorted_cands[128];
+        size_t cand_count = 0;
+        for (size_t e = 0; e < extract_need && e < 128; ++e) {
+            float best_d = FLT_MAX;
+            size_t best_i = SIZE_MAX;
+            for (size_t i = 0; i < copy_n; ++i) {
+                if (tmp_dis2[i] < best_d) { best_d = tmp_dis2[i]; best_i = i; }
+            }
+            if (best_i == SIZE_MAX) break;
+            sorted_cands[cand_count].node_idx = tmp_ids2[best_i];
+            sorted_cands[cand_count].distance = best_d;
+            cand_count++;
+            tmp_dis2[best_i] = FLT_MAX;
+        }
+
+        size_t sel_buf[64];
+        size_t sel_count = 0;
+        for (size_t ci = 0; ci < cand_count && sel_count < max_nbrs; ++ci) {
+            size_t cn = sorted_cands[ci].node_idx;
+            if (cn == node_idx || index->nodes[cn].deleted) continue;
+            float dq = sorted_cands[ci].distance;
+            const float *cd = SOA_VEC_IMPL(index->nodes[cn].vector_index);
+            int keep = 1;
+            for (size_t si = 0; si < sel_count; ++si) {
+                float ds = gv_hnsw_raw_distance(cd, SOA_VEC_IMPL(index->nodes[sel_buf[si]].vector_index), soa_dim, index->distance_type);
+                if (ds < dq) { keep = 0; break; }
+            }
+            if (keep) sel_buf[sel_count++] = cn;
+        }
+        if (sel_count < max_nbrs) {
+            for (size_t ci = 0; ci < cand_count && sel_count < max_nbrs; ++ci) {
+                size_t cn = sorted_cands[ci].node_idx;
+                if (cn == node_idx || index->nodes[cn].deleted) continue;
+                int dup = 0;
+                for (size_t si = 0; si < sel_count; ++si) {
+                    if (sel_buf[si] == cn) { dup = 1; break; }
+                }
+                if (!dup) sel_buf[sel_count++] = cn;
+            }
+        }
+
+        for (size_t i = 0; i < sel_count; ++i) {
+            size_t sel = sel_buf[i];
+            add_link(index, node_idx, sel, (size_t)lc, soa_base, soa_dim);
+            if ((size_t)lc <= index->nodes[sel].level) {
+                add_link(index, sel, node_idx, (size_t)lc, soa_base, soa_dim);
+            }
+        }
+    }
+
+insert_impl_done:
+    #undef SOA_VEC_IMPL
+    return 0;
+}
+
+/* Raw insert: skip GV_Vector allocation */
+int gv_hnsw_insert_raw(void *index_ptr, const float *data, size_t dimension) {
+    if (!index_ptr || !data || dimension == 0) return -1;
+    GV_HNSWIndex *index = (GV_HNSWIndex *)index_ptr;
+    if (dimension != index->dimension) return -1;
+
+    size_t vector_index = gv_soa_storage_add(index->soa_storage, data, NULL);
+    if (vector_index == (size_t)-1) return -1;
+
+    return hnsw_insert_impl(index, vector_index, dimension);
+}
+
+int gv_hnsw_search(void *index_ptr, const GV_Vector *query, size_t k,
+                   GV_SearchResult *results, GV_DistanceType distance_type,
+                   const char *filter_key, const char *filter_value) {
+    if (!index_ptr || !query || !results || k == 0) return -1;
+    GV_HNSWIndex *index = (GV_HNSWIndex *)index_ptr;
+    if (query->dimension != index->dimension || index->entry_point == SIZE_MAX) return 0;
 
     memset(results, 0, k * sizeof(GV_SearchResult));
 
     GV_BinaryVector *query_binary = NULL;
     if (index->use_binary_quant) {
         query_binary = gv_binary_quantize(query->data, query->dimension);
-        if (query_binary == NULL) {
-            return -1;
-        }
+        if (!query_binary) return -1;
     }
 
-    GV_HNSWNode *current = index->entryPoint;
-    size_t currentLevel = index->entryPoint->level;
+    const float *soa_base = index->soa_storage->data;
+    const size_t soa_dim = index->dimension;
+    const float *qdata = query->data;
+    #define SRCH_VEC(vidx) (soa_base + (vidx) * soa_dim)
 
-    for (int lc = (int)currentLevel; lc > 0; --lc) {
-        if (current == NULL || (size_t)lc > current->level) continue;
+    /* Greedy descent through upper layers */
+    size_t cur = index->entry_point;
+    size_t curLevel = index->nodes[cur].level;
 
-        /* Compute initial distance to current node */
-        float cur_dist = FLT_MAX;
-        {
-            const float *cur_data = gv_soa_storage_get_data(index->soa_storage, current->vector_index);
-            if (cur_data != NULL) {
-                GV_Vector temp_cur = {.data = (float *)cur_data, .dimension = query->dimension, .metadata = NULL};
-                cur_dist = gv_distance(&temp_cur, query, distance_type);
-            }
-        }
+    for (int lc = (int)curLevel; lc > 0; --lc) {
+        if ((size_t)lc > index->nodes[cur].level) continue;
+        float cur_dist = gv_hnsw_raw_distance(SRCH_VEC(index->nodes[cur].vector_index), qdata, soa_dim, distance_type);
 
-        /* Greedy walk at this layer until no closer neighbor found */
         int improved = 1;
         while (improved) {
             improved = 0;
-            if (current->neighbor_counts == NULL || current->neighbors == NULL ||
-                (size_t)lc > current->level || current->neighbor_counts[lc] == 0 ||
-                current->neighbors[lc] == NULL) {
-                break;
-            }
-            for (size_t i = 0; i < current->neighbor_counts[lc]; ++i) {
-                GV_HNSWNode *nb = current->neighbors[lc][i];
-                if (nb == NULL || nb->deleted != 0) continue;
+            int32_t *nbs = nb_begin(index, cur, (size_t)lc);
+            size_t max_n = max_nb_at_level(index, (size_t)lc);
+            for (size_t i = 0; i < max_n; ++i) {
+                int32_t nb = nbs[i];
+                if (nb < 0) break;
+                if (index->nodes[nb].deleted) continue;
                 float dist;
-                if (index->use_binary_quant && query_binary != NULL &&
-                    nb->binary_vector != NULL) {
-                    size_t hamming = gv_binary_hamming_distance_fast(query_binary, nb->binary_vector);
-                    dist = (float)hamming;
+                if (index->use_binary_quant && query_binary && index->nodes[nb].binary_vector) {
+                    dist = (float)gv_binary_hamming_distance_fast(query_binary, index->nodes[nb].binary_vector);
                 } else {
-                    const float *nb_data = gv_soa_storage_get_data(index->soa_storage, nb->vector_index);
-                    if (nb_data == NULL) continue;
-                    GV_Vector temp_nb = {.data = (float *)nb_data, .dimension = query->dimension, .metadata = NULL};
-                    dist = gv_distance(&temp_nb, query, distance_type);
+                    dist = gv_hnsw_raw_distance(SRCH_VEC(index->nodes[nb].vector_index), qdata, soa_dim, distance_type);
                 }
-                if (dist < cur_dist) {
-                    cur_dist = dist;
-                    current = nb;
-                    improved = 1;
-                }
+                if (dist < cur_dist) { cur_dist = dist; cur = (size_t)nb; improved = 1; }
             }
         }
-        currentLevel = current->level;
-    }
-    
-    if (current == NULL) {
-        return 0;
+        curLevel = index->nodes[cur].level;
     }
 
+    /* Level-0 beam search */
     size_t ef = index->efSearch;
-    if (filter_key != NULL && index->use_acorn) {
+    if (filter_key && index->use_acorn) {
         size_t factor = index->acorn_hops + 1;
-        if (factor > 3) {
-            factor = 3;
-        }
-        if (ef > 0 && ef <= SIZE_MAX / factor) {
-            ef *= factor;
-        }
+        if (factor > 3) factor = 3;
+        if (ef > 0 && ef <= SIZE_MAX / factor) ef *= factor;
     }
 
-    GV_HNSWCandidate *candidates = (GV_HNSWCandidate *)malloc(ef * sizeof(GV_HNSWCandidate));
-    if (candidates == NULL) {
-        return -1;
+    index->current_epoch++;
+    if (index->current_epoch == 0) {
+        memset(index->visited_epoch, 0, index->visited_capacity * sizeof(uint32_t));
+        index->current_epoch = 1;
     }
 
-    size_t candidate_count = 0;
-    int *visited = (int *)calloc(index->count, sizeof(int));
-    if (visited == NULL) {
-        free(candidates);
-        return -1;
-    }
-
-    float current_dist;
-    if (index->use_binary_quant && query_binary != NULL && current->binary_vector != NULL) {
-        size_t hamming = gv_binary_hamming_distance_fast(query_binary, current->binary_vector);
-        current_dist = (float)hamming;
-    } else {
-        const float *current_data = gv_soa_storage_get_data(index->soa_storage, current->vector_index);
-        if (current_data == NULL) {
-            free(candidates);
-            free(visited);
-            if (query_binary != NULL) {
-                gv_binary_vector_destroy(query_binary);
-            }
+    size_t buf_need = ef;
+    if (buf_need > index->search_buf_size) {
+        float *nd = (float *)realloc(index->search_dis, buf_need * sizeof(float));
+        size_t *ni = (size_t *)realloc(index->search_ids, buf_need * sizeof(size_t));
+        uint8_t *np = (uint8_t *)realloc(index->search_proc, buf_need * sizeof(uint8_t));
+        if (!nd || !ni || !np) {
+            if (nd) index->search_dis = nd;
+            if (ni) index->search_ids = ni;
+            if (np) index->search_proc = np;
+            if (query_binary) gv_binary_vector_destroy(query_binary);
             return -1;
         }
-        GV_Vector temp_current = {.data = (float *)current_data, .dimension = query->dimension, .metadata = NULL};
-        current_dist = gv_distance(&temp_current, query, distance_type);
+        index->search_dis = nd;
+        index->search_ids = ni;
+        index->search_proc = np;
+        index->search_buf_size = buf_need;
     }
-    candidates[candidate_count].node = current;
-    candidates[candidate_count++].distance = current_dist;
-    
-    visited[current->index] = 1;
 
-    int *search_processed = (int *)calloc(ef, sizeof(int));
-    if (search_processed == NULL) {
-        free(candidates);
-        free(visited);
-        if (query_binary != NULL) gv_binary_vector_destroy(query_binary);
-        return -1;
+    float *heap_dis = index->search_dis;
+    size_t *heap_ids = index->search_ids;
+    uint8_t *heap_proc = index->search_proc;
+    size_t heap_k = 0;
+
+    float cur_dist;
+    if (index->use_binary_quant && query_binary && index->nodes[cur].binary_vector) {
+        cur_dist = (float)gv_binary_hamming_distance_fast(query_binary, index->nodes[cur].binary_vector);
+    } else {
+        cur_dist = gv_hnsw_raw_distance(SRCH_VEC(index->nodes[cur].vector_index), qdata, soa_dim, distance_type);
     }
+    mmheap_push(heap_dis, heap_ids, heap_proc, &heap_k, buf_need,
+                cur, cur_dist);
+    index->visited_epoch[cur] = index->current_epoch;
 
     for (;;) {
-        /* Find closest unprocessed candidate */
-        size_t best = (size_t)-1;
-        for (size_t ci = 0; ci < candidate_count; ++ci) {
-            if (!search_processed[ci]) {
-                best = ci;
-                break;  /* sorted list — first unprocessed is closest */
-            }
+        float cand_dist;
+        size_t cand_node = mmheap_pop_min(heap_dis, heap_ids, heap_proc,
+                                          heap_k, &cand_dist);
+        if (cand_node == SIZE_MAX) break;
+
+        if (index->nodes[cand_node].deleted) continue;
+
+        /* Termination: if this candidate is worse than the heap max, stop */
+        if (heap_k >= ef && cand_dist > heap_dis[0]) break;
+
+        int32_t *nbs = nb_begin(index, cand_node, 0);
+        size_t max_n = max_nb_at_level(index, 0);
+
+        /* Pass 1: collect valid neighbors + prefetch visited table */
+        size_t jmax = 0;
+        int32_t valid_nbs[64];
+        for (size_t i = 0; i < max_n; ++i) {
+            int32_t nb = nbs[i];
+            if (nb < 0) break;
+            valid_nbs[jmax] = nb;
+            prefetch_L2(&index->visited_epoch[nb]);
+            jmax++;
         }
-        if (best == (size_t)-1) break;
 
-        GV_HNSWNode *candidate_node = candidates[best].node;
-        float candidate_dist = candidates[best].distance;
-        search_processed[best] = 1;
+        /* Pass 2: batch-4 distance computation with visited check */
+        size_t batch_cnt = 0;
+        size_t batch_nids[4];
+        const float *batch_ptrs[4];
 
-        if (candidate_node == NULL || candidate_node->neighbor_counts == NULL ||
-            candidate_node->neighbors == NULL || candidate_node->neighbor_counts[0] == 0 ||
-            candidate_node->neighbors[0] == NULL) {
-            continue;
-        }
+        for (size_t i = 0; i < jmax; ++i) {
+            int32_t nb = valid_nbs[i];
+            if (index->nodes[nb].deleted) continue;
+            if ((size_t)nb >= index->visited_capacity ||
+                index->visited_epoch[nb] == index->current_epoch) continue;
+            index->visited_epoch[nb] = index->current_epoch;
 
-        if (candidate_count >= ef && candidate_dist > candidates[candidate_count - 1].distance) {
-            break;
-        }
-
-        for (size_t i = 0; i < candidate_node->neighbor_counts[0]; ++i) {
-            GV_HNSWNode *neighbor = candidate_node->neighbors[0][i];
-            if (neighbor == NULL || neighbor->deleted != 0) continue;
-
-            size_t node_idx = neighbor->index;
-            if (node_idx >= index->count || visited[node_idx]) continue;
-
-            visited[node_idx] = 1;
-
-            float dist;
-            if (index->use_binary_quant && query_binary != NULL && neighbor->binary_vector != NULL) {
-                size_t hamming = gv_binary_hamming_distance_fast(query_binary, neighbor->binary_vector);
-                dist = (float)hamming;
-            } else {
-                const float *neighbor_data = gv_soa_storage_get_data(index->soa_storage, neighbor->vector_index);
-                if (neighbor_data == NULL) continue;
-                GV_Vector temp_neighbor = {.data = (float *)neighbor_data, .dimension = query->dimension, .metadata = NULL};
-                dist = gv_distance(&temp_neighbor, query, distance_type);
+            /* Prefetch next vector data */
+            if (i + 1 < jmax) {
+                prefetch_L2(SRCH_VEC(index->nodes[valid_nbs[i+1]].vector_index));
             }
 
-            if (candidate_count < ef) {
-                size_t pos = candidate_count++;
-                candidates[pos].node = neighbor;
-                candidates[pos].distance = dist;
-                search_processed[pos] = 0;
-                while (pos > 0 && candidates[pos].distance < candidates[pos - 1].distance) {
-                    GV_HNSWCandidate tmp = candidates[pos];
-                    int ptmp = search_processed[pos];
-                    candidates[pos] = candidates[pos - 1];
-                    search_processed[pos] = search_processed[pos - 1];
-                    candidates[pos - 1] = tmp;
-                    search_processed[pos - 1] = ptmp;
-                    pos--;
-                }
-            } else if (dist < candidates[candidate_count - 1].distance) {
-                size_t pos = candidate_count - 1;
-                candidates[pos].node = neighbor;
-                candidates[pos].distance = dist;
-                search_processed[pos] = 0;
-                while (pos > 0 && candidates[pos].distance < candidates[pos - 1].distance) {
-                    GV_HNSWCandidate tmp = candidates[pos];
-                    int ptmp = search_processed[pos];
-                    candidates[pos] = candidates[pos - 1];
-                    search_processed[pos] = search_processed[pos - 1];
-                    candidates[pos - 1] = tmp;
-                    search_processed[pos - 1] = ptmp;
-                    pos--;
-                }
+            if (index->use_binary_quant && query_binary && index->nodes[nb].binary_vector) {
+                float dist = (float)gv_binary_hamming_distance_fast(query_binary, index->nodes[nb].binary_vector);
+                mmheap_push(heap_dis, heap_ids, heap_proc, &heap_k, buf_need,
+                            (size_t)nb, dist);
+                continue;
             }
+
+            batch_nids[batch_cnt] = (size_t)nb;
+            batch_ptrs[batch_cnt] = SRCH_VEC(index->nodes[nb].vector_index);
+            batch_cnt++;
+
+            if (batch_cnt == 4 && distance_type == GV_DISTANCE_EUCLIDEAN) {
+                float d0, d1, d2, d3;
+                gv_hnsw_l2_batch4(qdata, batch_ptrs[0], batch_ptrs[1],
+                                   batch_ptrs[2], batch_ptrs[3], soa_dim,
+                                   &d0, &d1, &d2, &d3);
+                /* Quick reject: skip heap push if distance >= max and heap full */
+                float thresh = (heap_k >= buf_need) ? heap_dis[0] : FLT_MAX;
+                if (d0 < thresh) mmheap_push(heap_dis, heap_ids, heap_proc, &heap_k, buf_need,
+                            batch_nids[0], d0);
+                if (d1 < thresh) mmheap_push(heap_dis, heap_ids, heap_proc, &heap_k, buf_need,
+                            batch_nids[1], d1);
+                if (d2 < thresh) mmheap_push(heap_dis, heap_ids, heap_proc, &heap_k, buf_need,
+                            batch_nids[2], d2);
+                if (d3 < thresh) mmheap_push(heap_dis, heap_ids, heap_proc, &heap_k, buf_need,
+                            batch_nids[3], d3);
+                batch_cnt = 0;
+            }
+        }
+        /* Remainder */
+        for (size_t r = 0; r < batch_cnt; ++r) {
+            float dist = gv_hnsw_raw_distance(batch_ptrs[r], qdata, soa_dim, distance_type);
+            mmheap_push(heap_dis, heap_ids, heap_proc, &heap_k, buf_need,
+                        batch_nids[r], dist);
         }
     }
-    free(search_processed);
 
-    free(visited);
-
-    if (candidate_count == 0) {
-        if (query_binary != NULL) {
-            gv_binary_vector_destroy(query_binary);
-        }
-        free(candidates);
+    if (heap_k == 0) {
+        if (query_binary) gv_binary_vector_destroy(query_binary);
         return 0;
     }
 
-    qsort(candidates, candidate_count, sizeof(GV_HNSWCandidate), compare_candidates);
+    /* Extract top-k from max-heap via repeated min-extraction */
+    size_t need = k;
+    if (index->use_binary_quant && index->quant_rerank > 0 && query_binary) {
+        need = (index->quant_rerank > k) ? index->quant_rerank : k;
+    }
+    if (need > heap_k) need = heap_k;
 
-    if (index->use_binary_quant && index->quant_rerank > 0 && query_binary != NULL) {
-        size_t rerank_count = (candidate_count < index->quant_rerank) ? candidate_count : index->quant_rerank;
-        for (size_t i = 0; i < rerank_count; ++i) {
-            if (candidates[i].node != NULL && candidates[i].node->deleted == 0) {
-                const float *node_data = gv_soa_storage_get_data(index->soa_storage, candidates[i].node->vector_index);
-                if (node_data != NULL) {
-                    GV_Vector temp_vec = {.data = (float *)node_data, .dimension = query->dimension, .metadata = NULL};
-                    candidates[i].distance = gv_distance(&temp_vec, query, distance_type);
-                }
+    /* Copy heap data to temp arrays for extraction (don't modify the pre-allocated buffers) */
+    float tmp_dis[1024];
+    size_t tmp_ids[1024];
+    size_t cand_count = (heap_k < 1024) ? heap_k : 1024;
+    memcpy(tmp_dis, heap_dis, cand_count * sizeof(float));
+    memcpy(tmp_ids, heap_ids, cand_count * sizeof(size_t));
+
+    GV_HNSWCandidate sorted_cands[512]; /* enough for k + rerank */
+    size_t sorted_count = 0;
+
+    /* Extract 'need' smallest elements */
+    for (size_t e = 0; e < need && e < 512; ++e) {
+        float best_d = FLT_MAX;
+        size_t best_i = SIZE_MAX;
+        for (size_t i = 0; i < cand_count; ++i) {
+            if (tmp_dis[i] < best_d) {
+                best_d = tmp_dis[i];
+                best_i = i;
             }
         }
-        qsort(candidates, candidate_count, sizeof(GV_HNSWCandidate), compare_candidates);
+        if (best_i == SIZE_MAX) break;
+        sorted_cands[sorted_count].node_idx = tmp_ids[best_i];
+        sorted_cands[sorted_count].distance = best_d;
+        sorted_count++;
+        tmp_dis[best_i] = FLT_MAX; /* mark as extracted */
     }
 
+    if (index->use_binary_quant && index->quant_rerank > 0 && query_binary) {
+        for (size_t i = 0; i < sorted_count; ++i) {
+            if (!index->nodes[sorted_cands[i].node_idx].deleted) {
+                sorted_cands[i].distance = gv_hnsw_raw_distance(
+                    SRCH_VEC(index->nodes[sorted_cands[i].node_idx].vector_index), qdata, soa_dim, distance_type);
+            }
+        }
+        qsort(sorted_cands, sorted_count, sizeof(GV_HNSWCandidate), compare_candidates);
+    }
+
+    /* Build results */
     size_t result_count = 0;
-    for (size_t i = 0; i < candidate_count && result_count < k; ++i) {
-        if (candidates[i].node == NULL || candidates[i].node->deleted != 0) continue;
-        
-        const float *node_data = gv_soa_storage_get_data(index->soa_storage, candidates[i].node->vector_index);
-        if (node_data == NULL) continue;
-        
-        GV_Metadata *node_metadata = gv_soa_storage_get_metadata(index->soa_storage, candidates[i].node->vector_index);
-        if (filter_key == NULL || gv_metadata_get_direct(node_metadata, filter_key) != NULL) {
-            if (filter_key == NULL || strcmp(gv_metadata_get_direct(node_metadata, filter_key), filter_value) == 0) {
-                /* Create a temporary vector view for the result */
-                GV_Vector *result_vec = (GV_Vector *)malloc(sizeof(GV_Vector));
-                if (result_vec == NULL) continue;
-                result_vec->data = (float *)malloc(query->dimension * sizeof(float));
-                if (result_vec->data == NULL) {
-                    free(result_vec);
-                    continue;
-                }
-                memcpy(result_vec->data, node_data, query->dimension * sizeof(float));
-                result_vec->dimension = query->dimension;
-                result_vec->metadata = gv_metadata_copy(node_metadata);
-                results[result_count].vector = result_vec;
-                results[result_count].distance = candidates[i].distance;
-                results[result_count].id = candidates[i].node->vector_index;
-                if (distance_type == GV_DISTANCE_COSINE) {
-                    results[result_count].distance = 1.0f - results[result_count].distance;
-                }
-                result_count++;
-            }
+    for (size_t i = 0; i < sorted_count && result_count < k; ++i) {
+        size_t cn = sorted_cands[i].node_idx;
+        if (index->nodes[cn].deleted) continue;
+
+        const float *node_data = SRCH_VEC(index->nodes[cn].vector_index);
+        GV_Metadata *node_meta = gv_soa_storage_get_metadata(index->soa_storage, index->nodes[cn].vector_index);
+
+        if (filter_key && !gv_metadata_get_direct(node_meta, filter_key)) continue;
+        if (filter_key && strcmp(gv_metadata_get_direct(node_meta, filter_key), filter_value) != 0) continue;
+
+        GV_Vector *result_vec = (GV_Vector *)malloc(sizeof(GV_Vector));
+        if (!result_vec) continue;
+        result_vec->data = (float *)malloc(soa_dim * sizeof(float));
+        if (!result_vec->data) { free(result_vec); continue; }
+        memcpy(result_vec->data, node_data, soa_dim * sizeof(float));
+        result_vec->dimension = soa_dim;
+        result_vec->metadata = gv_metadata_copy(node_meta);
+        results[result_count].vector = result_vec;
+        results[result_count].distance = sorted_cands[i].distance;
+        results[result_count].id = index->nodes[cn].vector_index;
+        if (distance_type == GV_DISTANCE_COSINE) {
+            results[result_count].distance = 1.0f - results[result_count].distance;
         }
+        result_count++;
     }
 
-    if (query_binary != NULL) {
-        gv_binary_vector_destroy(query_binary);
-    }
-    free(candidates);
+    if (query_binary) gv_binary_vector_destroy(query_binary);
+    #undef SRCH_VEC
     return (int)result_count;
 }
 
 void gv_hnsw_destroy(void *index_ptr) {
-    if (index_ptr == NULL) {
-        return;
-    }
-
+    if (!index_ptr) return;
     GV_HNSWIndex *index = (GV_HNSWIndex *)index_ptr;
     for (size_t i = 0; i < index->count; ++i) {
-        gv_hnsw_node_destroy(index->nodes[i]);
+        if (index->nodes[i].binary_vector)
+            gv_binary_vector_destroy(index->nodes[i].binary_vector);
     }
     free(index->nodes);
-    /* Only destroy SoA storage if we own it (created it ourselves) */
-    if (index->soa_storage != NULL && index->soa_storage_owned != 0) {
+    free(index->neighbors);
+    free(index->offsets);
+    free(index->cum_nb_per_level);
+    if (index->soa_storage && index->soa_storage_owned)
         gv_soa_storage_destroy(index->soa_storage);
-    }
+    free(index->visited_epoch);
+    free(index->search_dis);
+    free(index->search_ids);
+    free(index->search_proc);
+    free(index->insert_dis);
+    free(index->insert_ids);
+    free(index->insert_proc);
     free(index);
 }
 
 size_t gv_hnsw_count(const void *index_ptr) {
-    if (index_ptr == NULL) {
-        return 0;
-    }
+    if (!index_ptr) return 0;
     return ((GV_HNSWIndex *)index_ptr)->count;
 }
 
 int gv_hnsw_delete(void *index_ptr, size_t node_index) {
-    if (index_ptr == NULL) {
-        return -1;
-    }
-
+    if (!index_ptr) return -1;
     GV_HNSWIndex *index = (GV_HNSWIndex *)index_ptr;
-    if (node_index >= index->count) {
-        return -1;
-    }
+    if (node_index >= index->count) return -1;
+    if (index->nodes[node_index].deleted) return -1;
 
-    GV_HNSWNode *node = index->nodes[node_index];
-    if (node == NULL || node->deleted != 0) {
-        return -1;
-    }
+    index->nodes[node_index].deleted = 1;
 
-    node->deleted = 1;
-
+    /* Remove from neighbor lists of other nodes */
     for (size_t i = 0; i < index->count; ++i) {
-        GV_HNSWNode *other = index->nodes[i];
-        if (other == NULL || other->deleted != 0 || other == node) {
-            continue;
-        }
-
-        for (size_t l = 0; l <= other->level; ++l) {
-            if (other->neighbors == NULL || other->neighbor_counts == NULL) {
-                continue;
-            }
-            if ((size_t)l > other->level || other->neighbors[l] == NULL) {
-                continue;
-            }
-
-            size_t write_pos = 0;
-            for (size_t j = 0; j < other->neighbor_counts[l]; ++j) {
-                if (other->neighbors[l][j] != node) {
-                    other->neighbors[l][write_pos++] = other->neighbors[l][j];
+        if (index->nodes[i].deleted || i == node_index) continue;
+        for (size_t l = 0; l <= index->nodes[i].level; ++l) {
+            int32_t *start = nb_begin(index, i, l);
+            size_t max_n = max_nb_at_level(index, l);
+            size_t wp = 0;
+            for (size_t j = 0; j < max_n; ++j) {
+                if (start[j] < 0) break;
+                if ((size_t)start[j] != node_index) {
+                    start[wp++] = start[j];
                 }
             }
-            other->neighbor_counts[l] = write_pos;
+            for (size_t j = wp; j < max_n; ++j) start[j] = -1;
         }
     }
 
-    if (index->entryPoint == node) {
+    if (index->entry_point == node_index) {
+        index->entry_point = SIZE_MAX;
         for (size_t i = 0; i < index->count; ++i) {
-            if (index->nodes[i] != NULL && index->nodes[i]->deleted == 0) {
-                index->entryPoint = index->nodes[i];
-                break;
-            }
+            if (!index->nodes[i].deleted) { index->entry_point = i; break; }
         }
     }
-
     return 0;
 }
 
-static int gv_write_uint32(FILE *out, uint32_t value) {
-    return (fwrite(&value, sizeof(uint32_t), 1, out) == 1) ? 0 : -1;
-}
+int gv_hnsw_update(void *index_ptr, size_t node_index, const float *new_data, size_t dimension) {
+    if (!index_ptr || !new_data) return -1;
+    GV_HNSWIndex *index = (GV_HNSWIndex *)index_ptr;
+    if (node_index >= index->count || dimension != index->dimension) return -1;
+    if (index->nodes[node_index].deleted) return -1;
 
-static int gv_write_uint64(FILE *out, uint64_t value) {
-    return (fwrite(&value, sizeof(uint64_t), 1, out) == 1) ? 0 : -1;
-}
-
-static int gv_write_floats(FILE *out, const float *data, size_t count) {
-    return (fwrite(data, sizeof(float), count, out) == count) ? 0 : -1;
-}
-
-static int gv_write_string(FILE *out, const char *str, uint32_t len) {
-    if (str == NULL && len > 0) {
+    if (gv_soa_storage_update_data(index->soa_storage, index->nodes[node_index].vector_index, new_data) != 0)
         return -1;
+
+    if (index->use_binary_quant) {
+        if (index->nodes[node_index].binary_vector)
+            gv_binary_vector_destroy(index->nodes[node_index].binary_vector);
+        index->nodes[node_index].binary_vector = gv_binary_quantize(new_data, dimension);
+        if (!index->nodes[node_index].binary_vector) return -1;
     }
-    if (gv_write_uint32(out, len) != 0) {
-        return -1;
-    }
-    if (len == 0) {
-        return 0;
-    }
-    return (fwrite(str, 1, len, out) == len) ? 0 : -1;
+    return 0;
 }
 
-static int gv_write_metadata(FILE *out, const GV_Metadata *meta_head) {
+static int gv_write_uint32(FILE *out, uint32_t v) { return (fwrite(&v, 4, 1, out) == 1) ? 0 : -1; }
+static int gv_write_uint64(FILE *out, uint64_t v) { return (fwrite(&v, 8, 1, out) == 1) ? 0 : -1; }
+static int gv_write_floats(FILE *out, const float *d, size_t c) { return (fwrite(d, 4, c, out) == c) ? 0 : -1; }
+static int gv_write_string(FILE *out, const char *s, uint32_t len) {
+    if (!s && len > 0) return -1;
+    if (gv_write_uint32(out, len) != 0) return -1;
+    if (len == 0) return 0;
+    return (fwrite(s, 1, len, out) == len) ? 0 : -1;
+}
+static int gv_write_metadata(FILE *out, const GV_Metadata *m) {
     uint32_t count = 0;
-    const GV_Metadata *cursor = meta_head;
-    while (cursor != NULL) {
-        count++;
-        cursor = cursor->next;
-    }
-
-    if (gv_write_uint32(out, count) != 0) {
-        return -1;
-    }
-
-    cursor = meta_head;
-    while (cursor != NULL) {
-        size_t key_len = strlen(cursor->key);
-        size_t val_len = strlen(cursor->value);
-        if (key_len > UINT32_MAX || val_len > UINT32_MAX) {
-            return -1;
-        }
-        if (gv_write_string(out, cursor->key, (uint32_t)key_len) != 0) {
-            return -1;
-        }
-        if (gv_write_string(out, cursor->value, (uint32_t)val_len) != 0) {
-            return -1;
-        }
-        cursor = cursor->next;
+    for (const GV_Metadata *c = m; c; c = c->next) count++;
+    if (gv_write_uint32(out, count) != 0) return -1;
+    for (const GV_Metadata *c = m; c; c = c->next) {
+        if (gv_write_string(out, c->key, (uint32_t)strlen(c->key)) != 0) return -1;
+        if (gv_write_string(out, c->value, (uint32_t)strlen(c->value)) != 0) return -1;
     }
     return 0;
 }
-
-static int gv_read_uint32(FILE *in, uint32_t *value) {
-    return (value != NULL && fread(value, sizeof(uint32_t), 1, in) == 1) ? 0 : -1;
-}
-
-static int gv_read_uint64(FILE *in, uint64_t *value) {
-    return (value != NULL && fread(value, sizeof(uint64_t), 1, in) == 1) ? 0 : -1;
-}
-
-static int gv_read_floats(FILE *in, float *data, size_t count) {
-    return (data != NULL && fread(data, sizeof(float), count, in) == count) ? 0 : -1;
-}
-
-static int gv_read_string(FILE *in, char **out_str, uint32_t len) {
-    if (out_str == NULL) {
-        return -1;
-    }
-    *out_str = NULL;
-    if (len == 0) {
-        *out_str = (char *)malloc(1);
-        if (*out_str == NULL) {
-            return -1;
-        }
-        (*out_str)[0] = '\0';
-        return 0;
-    }
-
+static int gv_read_uint32(FILE *in, uint32_t *v) { return (v && fread(v, 4, 1, in) == 1) ? 0 : -1; }
+static int gv_read_uint64(FILE *in, uint64_t *v) { return (v && fread(v, 8, 1, in) == 1) ? 0 : -1; }
+static int gv_read_floats(FILE *in, float *d, size_t c) { return (d && fread(d, 4, c, in) == c) ? 0 : -1; }
+static int gv_read_string(FILE *in, char **s, uint32_t len) {
+    if (!s) return -1;
+    *s = NULL;
+    if (len == 0) { *s = (char *)calloc(1, 1); return *s ? 0 : -1; }
     char *buf = (char *)malloc(len + 1);
-    if (buf == NULL) {
-        return -1;
-    }
-    if (fread(buf, 1, len, in) != len) {
-        free(buf);
-        return -1;
-    }
-    buf[len] = '\0';
-    *out_str = buf;
+    if (!buf) return -1;
+    if (fread(buf, 1, len, in) != len) { free(buf); return -1; }
+    buf[len] = '\0'; *s = buf;
     return 0;
 }
-
 static int gv_read_metadata(FILE *in, GV_Vector *vec) {
-    if (vec == NULL) {
-        return -1;
-    }
-
+    if (!vec) return -1;
     uint32_t count = 0;
-    if (gv_read_uint32(in, &count) != 0) {
-        return -1;
-    }
-
+    if (gv_read_uint32(in, &count) != 0) return -1;
     for (uint32_t i = 0; i < count; ++i) {
-        uint32_t key_len = 0;
-        uint32_t val_len = 0;
-        char *key = NULL;
-        char *value = NULL;
-
-        if (gv_read_uint32(in, &key_len) != 0) {
-            return -1;
-        }
-        if (gv_read_string(in, &key, key_len) != 0) {
-            free(key);
-            return -1;
-        }
-
-        if (gv_read_uint32(in, &val_len) != 0) {
-            free(key);
-            return -1;
-        }
-        if (gv_read_string(in, &value, val_len) != 0) {
-            free(key);
-            return -1;
-        }
-
-        if (gv_vector_set_metadata(vec, key, value) != 0) {
-            free(key);
-            free(value);
-            return -1;
-        }
-
-        free(key);
-        free(value);
+        uint32_t kl = 0, vl = 0;
+        char *key = NULL, *value = NULL;
+        if (gv_read_uint32(in, &kl) != 0 || gv_read_string(in, &key, kl) != 0) { free(key); return -1; }
+        if (gv_read_uint32(in, &vl) != 0 || gv_read_string(in, &value, vl) != 0) { free(key); free(value); return -1; }
+        if (gv_vector_set_metadata(vec, key, value) != 0) { free(key); free(value); return -1; }
+        free(key); free(value);
     }
-
     return 0;
 }
 
 int gv_hnsw_save(const void *index_ptr, FILE *out, uint32_t version) {
-    if (index_ptr == NULL || out == NULL) {
-        return -1;
-    }
-
+    if (!index_ptr || !out) return -1;
     GV_HNSWIndex *index = (GV_HNSWIndex *)index_ptr;
-    if (gv_write_uint32(out, (uint32_t)index->M) != 0) {
-        return -1;
-    }
-    if (gv_write_uint32(out, (uint32_t)index->efConstruction) != 0) {
-        return -1;
-    }
-    if (gv_write_uint32(out, (uint32_t)index->efSearch) != 0) {
-        return -1;
-    }
-    if (gv_write_uint32(out, (uint32_t)index->maxLevel) != 0) {
-        return -1;
-    }
-    if (gv_write_uint64(out, (uint64_t)index->count) != 0) {
-        return -1;
-    }
 
-    uint64_t entry_point_idx = UINT64_MAX;
-    if (index->entryPoint != NULL) {
-        for (size_t i = 0; i < index->count; ++i) {
-            if (index->nodes[i] == index->entryPoint) {
-                entry_point_idx = (uint64_t)i;
-                break;
-            }
-        }
-    }
-    if (gv_write_uint64(out, entry_point_idx) != 0) {
-        return -1;
-    }
+    if (gv_write_uint32(out, (uint32_t)index->M) != 0) return -1;
+    if (gv_write_uint32(out, (uint32_t)index->efConstruction) != 0) return -1;
+    if (gv_write_uint32(out, (uint32_t)index->efSearch) != 0) return -1;
+    if (gv_write_uint32(out, (uint32_t)index->maxLevel) != 0) return -1;
+    if (gv_write_uint64(out, (uint64_t)index->count) != 0) return -1;
 
-    /* First pass: write node metadata and vector data so the reader can
-       reconstruct nodes before wiring up graph links. */
+    uint64_t ep = (index->entry_point == SIZE_MAX) ? UINT64_MAX : (uint64_t)index->entry_point;
+    if (gv_write_uint64(out, ep) != 0) return -1;
+
+    /* Pass 1: node data */
     for (size_t i = 0; i < index->count; ++i) {
-        GV_HNSWNode *node = index->nodes[i];
-        if (node == NULL) {
-            return -1;
-        }
-
-        if (gv_write_uint32(out, (uint32_t)node->level) != 0) {
-            return -1;
-        }
-
-        const float *vector_data = gv_soa_storage_get_data(index->soa_storage, node->vector_index);
-        if (vector_data == NULL) {
-            return -1;
-        }
-        if (gv_write_floats(out, vector_data, index->dimension) != 0) {
-            return -1;
-        }
-
+        if (gv_write_uint32(out, (uint32_t)index->nodes[i].level) != 0) return -1;
+        const float *vd = gv_soa_storage_get_data(index->soa_storage, index->nodes[i].vector_index);
+        if (!vd) return -1;
+        if (gv_write_floats(out, vd, index->dimension) != 0) return -1;
         if (version >= 2) {
-            GV_Metadata *metadata = gv_soa_storage_get_metadata(index->soa_storage, node->vector_index);
-            if (gv_write_metadata(out, metadata) != 0) {
-                return -1;
-            }
+            GV_Metadata *meta = gv_soa_storage_get_metadata(index->soa_storage, index->nodes[i].vector_index);
+            if (gv_write_metadata(out, meta) != 0) return -1;
         }
     }
 
-    /* Second pass: write neighbor graph connectivity. */
+    /* Pass 2: neighbor connectivity */
     for (size_t i = 0; i < index->count; ++i) {
-        GV_HNSWNode *node = index->nodes[i];
-        if (node == NULL) {
-            return -1;
-        }
-        for (size_t l = 0; l <= node->level; ++l) {
-            if (gv_write_uint32(out, (uint32_t)node->neighbor_counts[l]) != 0) {
-                return -1;
-            }
-            for (size_t j = 0; j < node->neighbor_counts[l]; ++j) {
-                size_t neighbor_idx = SIZE_MAX;
-                for (size_t k = 0; k < index->count; ++k) {
-                    if (index->nodes[k] == node->neighbors[l][j]) {
-                        neighbor_idx = k;
-                        break;
-                    }
-                }
-                if (neighbor_idx == SIZE_MAX) {
-                    return -1;
-                }
-                if (gv_write_uint64(out, (uint64_t)neighbor_idx) != 0) {
-                    return -1;
-                }
+        for (size_t l = 0; l <= index->nodes[i].level; ++l) {
+            size_t nc = count_neighbors(index, i, l);
+            if (gv_write_uint32(out, (uint32_t)nc) != 0) return -1;
+            int32_t *start = nb_begin(index, i, l);
+            for (size_t j = 0; j < nc; ++j) {
+                if (gv_write_uint64(out, (uint64_t)start[j]) != 0) return -1;
             }
         }
     }
-
     return 0;
 }
 
 int gv_hnsw_load(void **index_ptr, FILE *in, size_t dimension, uint32_t version) {
-    if (index_ptr == NULL || in == NULL || dimension == 0) {
-        return -1;
-    }
+    if (!index_ptr || !in || dimension == 0) return -1;
 
-    uint32_t M = 0;
-    uint32_t efConstruction = 0;
-    uint32_t efSearch = 0;
-    uint32_t maxLevel = 0;
-    uint64_t count = 0;
-    uint64_t entry_point_idx = 0;
-    if (gv_read_uint32(in, &M) != 0) {
-        return -1;
-    }
-    if (gv_read_uint32(in, &efConstruction) != 0) {
-        return -1;
-    }
-    if (gv_read_uint32(in, &efSearch) != 0) {
-        return -1;
-    }
-    if (gv_read_uint32(in, &maxLevel) != 0) {
-        return -1;
-    }
-    if (gv_read_uint64(in, &count) != 0) {
-        return -1;
-    }
-    if (gv_read_uint64(in, &entry_point_idx) != 0) {
-        return -1;
-    }
+    uint32_t M = 0, efConstruction = 0, efSearch = 0, maxLevel = 0;
+    uint64_t count = 0, entry_point_idx = 0;
+    if (gv_read_uint32(in, &M) != 0) return -1;
+    if (gv_read_uint32(in, &efConstruction) != 0) return -1;
+    if (gv_read_uint32(in, &efSearch) != 0) return -1;
+    if (gv_read_uint32(in, &maxLevel) != 0) return -1;
+    if (gv_read_uint64(in, &count) != 0) return -1;
+    if (gv_read_uint64(in, &entry_point_idx) != 0) return -1;
 
     GV_HNSWConfig config = {.M = M, .efConstruction = efConstruction, .efSearch = efSearch, .maxLevel = maxLevel};
-    void *index = gv_hnsw_create(dimension, &config, NULL);
-    if (index == NULL) {
-        return -1;
+    void *idx = gv_hnsw_create(dimension, &config, NULL);
+    if (!idx) return -1;
+    GV_HNSWIndex *hnsw = (GV_HNSWIndex *)idx;
+
+    if (count == 0) { *index_ptr = idx; return 0; }
+
+    /* Grow if needed */
+    if (count > hnsw->nodes_capacity) {
+        size_t nc = (size_t)count;
+        GV_HNSWNode *nn = (GV_HNSWNode *)realloc(hnsw->nodes, nc * sizeof(GV_HNSWNode));
+        if (!nn) { gv_hnsw_destroy(idx); return -1; }
+        hnsw->nodes = nn;
+        size_t *no = (size_t *)realloc(hnsw->offsets, nc * sizeof(size_t));
+        if (!no) { gv_hnsw_destroy(idx); return -1; }
+        hnsw->offsets = no;
+        uint32_t *nv = (uint32_t *)realloc(hnsw->visited_epoch, nc * sizeof(uint32_t));
+        if (!nv) { gv_hnsw_destroy(idx); return -1; }
+        memset(nv + hnsw->visited_capacity, 0, (nc - hnsw->visited_capacity) * sizeof(uint32_t));
+        hnsw->visited_epoch = nv;
+        hnsw->visited_capacity = nc;
+        hnsw->nodes_capacity = nc;
     }
 
-    GV_HNSWIndex *hnsw_index = (GV_HNSWIndex *)index;
-    if (count == 0) {
-        *index_ptr = index;
-        return 0;
-    }
-    hnsw_index->count = (size_t)count;
-
-    if (count > hnsw_index->nodes_capacity) {
-        size_t new_capacity = (size_t)count;
-        GV_HNSWNode **new_nodes = (GV_HNSWNode **)realloc(hnsw_index->nodes, new_capacity * sizeof(GV_HNSWNode *));
-        if (new_nodes == NULL) {
-            gv_hnsw_destroy(index);
-            return -1;
-        }
-        hnsw_index->nodes = new_nodes;
-        hnsw_index->nodes_capacity = new_capacity;
-    }
-
+    /* Read nodes */
     for (size_t i = 0; i < (size_t)count; ++i) {
-        uint32_t level = 0;
-        if (gv_read_uint32(in, &level) != 0) {
-            gv_hnsw_destroy(index);
-            return -1;
-        }
+        uint32_t lev = 0;
+        if (gv_read_uint32(in, &lev) != 0) { gv_hnsw_destroy(idx); return -1; }
 
-        float *vector_data = (float *)malloc(dimension * sizeof(float));
-        if (vector_data == NULL) {
-            gv_hnsw_destroy(index);
-            return -1;
-        }
+        float *vd = (float *)malloc(dimension * sizeof(float));
+        if (!vd) { gv_hnsw_destroy(idx); return -1; }
+        if (gv_read_floats(in, vd, dimension) != 0) { free(vd); gv_hnsw_destroy(idx); return -1; }
 
-        if (gv_read_floats(in, vector_data, dimension) != 0) {
-            free(vector_data);
-            gv_hnsw_destroy(index);
-            return -1;
-        }
-
-        GV_Metadata *metadata = NULL;
+        GV_Metadata *meta = NULL;
         if (version >= 2) {
-            GV_Vector temp_vec = {.data = vector_data, .dimension = dimension, .metadata = NULL};
-            if (gv_read_metadata(in, &temp_vec) != 0) {
-                free(vector_data);
-                gv_hnsw_destroy(index);
-                return -1;
-            }
-            metadata = temp_vec.metadata;
+            GV_Vector tmp = {.data = vd, .dimension = dimension, .metadata = NULL};
+            if (gv_read_metadata(in, &tmp) != 0) { free(vd); gv_hnsw_destroy(idx); return -1; }
+            meta = tmp.metadata;
         }
 
-        size_t vector_index = gv_soa_storage_add(hnsw_index->soa_storage, vector_data, metadata);
-        free(vector_data);
-        if (vector_index == (size_t)-1) {
-            gv_hnsw_destroy(index);
-            return -1;
-        }
+        size_t vi = gv_soa_storage_add(hnsw->soa_storage, vd, meta);
+        free(vd);
+        if (vi == (size_t)-1) { gv_hnsw_destroy(idx); return -1; }
 
-        GV_HNSWNode *node = (GV_HNSWNode *)malloc(sizeof(GV_HNSWNode));
-        if (node == NULL) {
-            gv_hnsw_destroy(index);
-            return -1;
-        }
+        hnsw->nodes[i].vector_index = vi;
+        hnsw->nodes[i].binary_vector = NULL;
+        hnsw->nodes[i].level = lev;
+        hnsw->nodes[i].deleted = 0;
 
-        node->vector_index = vector_index;
-        node->level = level;
-        node->deleted = 0;
-        node->neighbors = (GV_HNSWNode ***)malloc((level + 1) * sizeof(GV_HNSWNode **));
-        node->neighbor_counts = (size_t *)calloc(level + 1, sizeof(size_t));
-        if (node->neighbors == NULL || node->neighbor_counts == NULL) {
-            free(node->neighbors);
-            free(node->neighbor_counts);
-            free(node);
-            gv_hnsw_destroy(index);
-            return -1;
-        }
-
-        for (size_t l = 0; l <= level; ++l) {
-            size_t max_neighbors = (size_t)M;
-            node->neighbors[l] = (GV_HNSWNode **)malloc(max_neighbors * sizeof(GV_HNSWNode *));
-            if (node->neighbors[l] == NULL) {
-                for (size_t j = 0; j < l; ++j) {
-                    free(node->neighbors[j]);
-                }
-                free(node->neighbors);
-                free(node->neighbor_counts);
-                free(node);
-                gv_hnsw_destroy(index);
-                return -1;
-            }
-            node->neighbor_counts[l] = 0;
-        }
-
-        hnsw_index->nodes[i] = node;
+        if (alloc_node_neighbors(hnsw, i, lev) != 0) { gv_hnsw_destroy(idx); return -1; }
     }
+    hnsw->count = (size_t)count;
 
+    /* Read neighbor connectivity */
     for (size_t i = 0; i < (size_t)count; ++i) {
-        GV_HNSWNode *node = hnsw_index->nodes[i];
-        for (size_t l = 0; l <= node->level; ++l) {
-            uint32_t neighbor_count = 0;
-            if (gv_read_uint32(in, &neighbor_count) != 0) {
-                gv_hnsw_destroy(index);
-                return -1;
+        for (size_t l = 0; l <= hnsw->nodes[i].level; ++l) {
+            uint32_t nc = 0;
+            if (gv_read_uint32(in, &nc) != 0) { gv_hnsw_destroy(idx); return -1; }
+            int32_t *start = nb_begin(hnsw, i, l);
+            size_t max_n = max_nb_at_level(hnsw, l);
+            for (uint32_t j = 0; j < nc && j < (uint32_t)max_n; ++j) {
+                uint64_t ni = 0;
+                if (gv_read_uint64(in, &ni) != 0) { gv_hnsw_destroy(idx); return -1; }
+                if (ni >= count) { gv_hnsw_destroy(idx); return -1; }
+                start[j] = (int32_t)ni;
             }
-            size_t max_neighbors = (size_t)M;
-            for (uint32_t j = 0; j < neighbor_count; ++j) {
-                uint64_t neighbor_idx = 0;
-                if (gv_read_uint64(in, &neighbor_idx) != 0) {
-                    gv_hnsw_destroy(index);
-                    return -1;
-                }
-                if (neighbor_idx >= count) {
-                    gv_hnsw_destroy(index);
-                    return -1;
-                }
-                if (node->neighbor_counts[l] < max_neighbors) {
-                    node->neighbors[l][node->neighbor_counts[l]++] = hnsw_index->nodes[neighbor_idx];
-                }
+            /* Skip excess */
+            for (uint32_t j = (uint32_t)max_n; j < nc; ++j) {
+                uint64_t dummy;
+                gv_read_uint64(in, &dummy);
             }
         }
     }
 
     if (entry_point_idx != UINT64_MAX && entry_point_idx < count) {
-        hnsw_index->entryPoint = hnsw_index->nodes[entry_point_idx];
+        hnsw->entry_point = (size_t)entry_point_idx;
     } else if (count > 0) {
-        hnsw_index->entryPoint = hnsw_index->nodes[0];
-    } else {
-        hnsw_index->entryPoint = NULL;
+        hnsw->entry_point = 0;
     }
 
-    *index_ptr = index;
+    *index_ptr = idx;
     return 0;
 }
 
@@ -1314,75 +1444,24 @@ int gv_hnsw_range_search(void *index_ptr, const GV_Vector *query, float radius,
                          GV_DistanceType distance_type,
                          const char *filter_key, const char *filter_value) {
     GV_HNSWIndex *index = (GV_HNSWIndex *)index_ptr;
-    if (index == NULL || query == NULL || results == NULL || max_results == 0 || radius < 0.0f ||
-        query->dimension != index->dimension || query->data == NULL) {
-        return -1;
-    }
+    if (!index || !query || !results || max_results == 0 || radius < 0.0f ||
+        query->dimension != index->dimension || !query->data) return -1;
+    if (index->count == 0 || index->entry_point == SIZE_MAX) return 0;
 
-    if (index->count == 0 || index->entryPoint == NULL) {
-        return 0;
-    }
-
-    /* Reuse the standard HNSW k-NN search and post-filter by radius. This keeps
-     * the implementation simple and consistent with the main search path. */
     GV_SearchResult *tmp = (GV_SearchResult *)malloc(max_results * sizeof(GV_SearchResult));
-    if (tmp == NULL) {
-        return -1;
-    }
+    if (!tmp) return -1;
 
-    int n = gv_hnsw_search(index_ptr, query, max_results, tmp, distance_type,
-                           filter_key, filter_value);
-    if (n <= 0) {
-        free(tmp);
-        return n;
-    }
+    int n = gv_hnsw_search(index_ptr, query, max_results, tmp, distance_type, filter_key, filter_value);
+    if (n <= 0) { free(tmp); return n; }
 
     size_t out = 0;
     for (int i = 0; i < n; ++i) {
         if (tmp[i].distance <= radius && out < max_results) {
             results[out++] = tmp[i];
         } else {
-            /* Free vectors that won't be returned to caller */
-            if (tmp[i].vector != NULL) {
-                gv_vector_destroy((GV_Vector *)tmp[i].vector);
-            }
+            if (tmp[i].vector) gv_vector_destroy((GV_Vector *)tmp[i].vector);
         }
     }
-
     free(tmp);
     return (int)out;
-}
-
-int gv_hnsw_update(void *index_ptr, size_t node_index, const float *new_data, size_t dimension) {
-    if (index_ptr == NULL || new_data == NULL) {
-        return -1;
-    }
-
-    GV_HNSWIndex *index = (GV_HNSWIndex *)index_ptr;
-    if (node_index >= index->count || dimension != index->dimension) {
-        return -1;
-    }
-
-    GV_HNSWNode *node = index->nodes[node_index];
-    if (node == NULL || node->deleted != 0) {
-        return -1;
-    }
-
-    /* Update vector data in SoA storage */
-    if (gv_soa_storage_update_data(index->soa_storage, node->vector_index, new_data) != 0) {
-        return -1;
-    }
-
-    /* Rebuild binary quantization if enabled */
-    if (index->use_binary_quant) {
-        if (node->binary_vector != NULL) {
-            gv_binary_vector_destroy(node->binary_vector);
-        }
-        node->binary_vector = gv_binary_quantize(new_data, dimension);
-        if (node->binary_vector == NULL) {
-            return -1;
-        }
-    }
-
-    return 0;
 }

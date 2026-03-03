@@ -24,6 +24,7 @@ typedef struct {
     size_t quant_rerank;   /**< Number of candidates to rerank with exact distance (0 = disable, default: 0) */
     int use_acorn;         /**< Enable ACORN-style extra exploration for filtered search (default: 0) */
     size_t acorn_hops;     /**< ACORN exploration depth in hops (1–2; default: 1) */
+    GV_DistanceType distance_type; /**< Distance metric for construction (default: EUCLIDEAN) */
 } GV_HNSWConfig;
 
 /**
@@ -44,6 +45,29 @@ void *gv_hnsw_create(size_t dimension, const GV_HNSWConfig *config, GV_SoAStorag
  * @return 0 on success, -1 on error.
  */
 int gv_hnsw_insert(void *index, GV_Vector *vector);
+
+/**
+ * @brief Pre-allocate capacity for n additional vectors.
+ *
+ * Call before bulk insert to avoid per-vector realloc overhead.
+ *
+ * @param index HNSW index instance; must be non-NULL.
+ * @param n Number of additional vectors to reserve space for.
+ * @return 0 on success, -1 on error.
+ */
+int gv_hnsw_reserve(void *index, size_t n);
+
+/**
+ * @brief Insert a raw vector (no GV_Vector allocation) into the HNSW index.
+ *
+ * Faster than gv_hnsw_insert for bulk loading. Data is copied into SoA storage.
+ *
+ * @param index HNSW index instance; must be non-NULL.
+ * @param data Raw float data array.
+ * @param dimension Vector dimension; must match index dimension.
+ * @return 0 on success, -1 on error.
+ */
+int gv_hnsw_insert_raw(void *index, const float *data, size_t dimension);
 
 /**
  * @brief Search for k nearest neighbors in HNSW.
