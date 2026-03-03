@@ -2435,6 +2435,29 @@ int gv_db_add_vectors(GV_Database *db, const float *data, size_t count, size_t d
     if (db == NULL || data == NULL || count == 0 || dimension != db->dimension) {
         return -1;
     }
+
+    /* HNSW fast path: bulk insert with single lock */
+    if (db->index_type == GV_INDEX_TYPE_HNSW && db->hnsw_index != NULL &&
+        db->wal == NULL && !db->cosine_normalized) {
+        pthread_rwlock_wrlock(&db->rwlock);
+        gv_hnsw_reserve(db->hnsw_index, count);
+
+        for (size_t i = 0; i < count; ++i) {
+            const float *vec = data + i * dimension;
+            int status = gv_hnsw_insert_raw(db->hnsw_index, vec, dimension);
+            if (status != 0) {
+                pthread_rwlock_unlock(&db->rwlock);
+                return -1;
+            }
+            db->count += 1;
+            db->total_inserts += 1;
+        }
+
+        gv_db_update_memory_usage(db);
+        pthread_rwlock_unlock(&db->rwlock);
+        return 0;
+    }
+
     for (size_t i = 0; i < count; ++i) {
         const float *vec = data + i * dimension;
         if (gv_db_add_vector(db, vec, dimension) != 0) {
