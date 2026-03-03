@@ -94,12 +94,12 @@ class IVFPQConfig:
     m: int = 8
     nbits: int = 8
     nprobe: int = 4
-    train_iters: int = 15
-    default_rerank: int = 32
+    train_iters: int = 25
+    default_rerank: int = 200
     use_cosine: bool = False
     use_scalar_quant: bool = False
     scalar_quant_config: Optional[ScalarQuantConfig] = None
-    oversampling_factor: float = 1.0
+    oversampling_factor: float = 3.0
 
     def __post_init__(self) -> None:
         if self.scalar_quant_config is None:
@@ -127,8 +127,9 @@ class PQConfig:
 class LSHConfig:
     """Configuration for LSH index."""
     num_tables: int = 8
-    num_hash_bits: int = 16
+    num_hash_bits: int = 4
     seed: int = 42
+    bucket_width: float = 4.0
 
 
 @dataclass
@@ -322,6 +323,7 @@ class Database:
                 "num_tables": lsh_config.num_tables,
                 "num_hash_bits": lsh_config.num_hash_bits,
                 "seed": lsh_config.seed,
+                "bucket_width": lsh_config.bucket_width,
             })
             db = lib.gv_db_open_with_lsh_config(c_path, dimension, int(index), config)
         else:
@@ -468,7 +470,7 @@ class Database:
             raise ValueError("training data empty")
         if len(flat) % count != 0:
             raise ValueError("inconsistent training data")
-        if (len(flat) / count) != self.dimension:
+        if (len(flat) // count) != self.dimension:
             raise ValueError("training vectors must match db dimension")
         buf = ffi.new("float[]", flat)
         rc = lib.gv_db_ivfflat_train(self._db, buf, count, self.dimension)
@@ -483,7 +485,7 @@ class Database:
             raise ValueError("training data empty")
         if len(flat) % count != 0:
             raise ValueError("inconsistent training data")
-        if (len(flat) / count) != self.dimension:
+        if (len(flat) // count) != self.dimension:
             raise ValueError("training vectors must match db dimension")
         buf = ffi.new("float[]", flat)
         rc = lib.gv_db_pq_train(self._db, buf, count, self.dimension)
