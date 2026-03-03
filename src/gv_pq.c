@@ -132,15 +132,17 @@ static int gv_pq_metadata_match(const GV_Metadata *meta, const char *key, const 
     return 0;
 }
 
-/* Euclidean distance between sub-vectors */
-static float gv_pq_subvec_distance(const float *a, const float *b, size_t dsub) {
+/* Squared Euclidean distance between sub-vectors */
+static float gv_pq_subvec_distance_sq(const float *a, const float *b, size_t dsub) {
     float sum = 0.0f;
     for (size_t i = 0; i < dsub; i++) {
         float diff = a[i] - b[i];
         sum += diff * diff;
     }
-    return sqrtf(sum);
+    return sum;
 }
+
+#define GV_PQ_RERANK_FACTOR 20
 
 /* K-means training for a single sub-quantizer */
 static void gv_pq_train_subquantizer(float *codebook, const float *subvecs,
@@ -169,7 +171,7 @@ static void gv_pq_train_subquantizer(float *codebook, const float *subvecs,
             float min_dist = FLT_MAX;
             uint32_t best_k = 0;
             for (size_t k = 0; k < ksub; k++) {
-                float dist = gv_pq_subvec_distance(&subvecs[i * dsub], &codebook[k * dsub], dsub);
+                float dist = gv_pq_subvec_distance_sq(&subvecs[i * dsub], &codebook[k * dsub], dsub);
                 if (dist < min_dist) {
                     min_dist = dist;
                     best_k = k;
@@ -220,7 +222,7 @@ static void gv_pq_encode(const GV_PQIndex *idx, const float *data, uint8_t *code
         uint8_t best_code = 0;
 
         for (size_t k = 0; k < idx->ksub; k++) {
-            float dist = gv_pq_subvec_distance(subvec, &subcodebook[k * idx->dsub], idx->dsub);
+            float dist = gv_pq_subvec_distance_sq(subvec, &subcodebook[k * idx->dsub], idx->dsub);
             if (dist < min_dist) {
                 min_dist = dist;
                 best_code = (uint8_t)k;
@@ -381,13 +383,17 @@ int gv_pq_search(void *index, const GV_Vector *query, size_t k,
         const float *subcodebook = &idx->codebooks[m_i * idx->ksub * idx->dsub];
 
         for (size_t k_i = 0; k_i < idx->ksub; k_i++) {
-            float dist = gv_pq_subvec_distance(query_subvec, &subcodebook[k_i * idx->dsub], idx->dsub);
-            distance_table[m_i * idx->ksub + k_i] = dist * dist; /* Store squared distance */
+            float dist_sq = gv_pq_subvec_distance_sq(query_subvec, &subcodebook[k_i * idx->dsub], idx->dsub);
+            distance_table[m_i * idx->ksub + k_i] = dist_sq;
         }
     }
 
-    /* Use max-heap for top-k */
-    GV_PQHeapItem *heap = (GV_PQHeapItem *)malloc(k * sizeof(GV_PQHeapItem));
+    /* Use oversampled max-heap for better reranking */
+    size_t oversample_k = k * GV_PQ_RERANK_FACTOR;
+    if (oversample_k > idx->entry_count) oversample_k = idx->entry_count;
+    if (oversample_k < k) oversample_k = k;
+
+    GV_PQHeapItem *heap = (GV_PQHeapItem *)malloc(oversample_k * sizeof(GV_PQHeapItem));
     if (!heap) {
         free(distance_table);
         return -1;
@@ -413,21 +419,67 @@ int gv_pq_search(void *index, const GV_Vector *query, size_t k,
         }
         float dist = sqrtf(dist_squared);
 
-        gv_pq_heap_push(heap, &heap_size, k, dist, i);
+        gv_pq_heap_push(heap, &heap_size, oversample_k, dist, i);
     }
 
-    /* Extract results from heap in sorted order */
-    int n = (int)heap_size;
-    for (int i = n - 1; i >= 0; i--) {
-        size_t entry_idx = heap[0].idx;
-        float approx_dist = heap[0].dist;
+    free(distance_table);
 
+    /* Extract all oversampled candidates, rerank with exact distance */
+    size_t cand_count = heap_size;
+    GV_PQHeapItem *candidates = (GV_PQHeapItem *)malloc(cand_count * sizeof(GV_PQHeapItem));
+    if (!candidates) {
+        free(heap);
+        return -1;
+    }
+
+    /* Extract from max-heap into array */
+    for (size_t i = cand_count; i > 0; --i) {
+        candidates[i - 1] = heap[0];
+        heap[0] = heap[heap_size - 1];
+        heap_size--;
+        if (heap_size > 0) {
+            gv_pq_heap_sift_down(heap, heap_size, 0);
+        }
+    }
+    free(heap);
+
+    /* Compute exact distances for all candidates */
+    for (size_t i = 0; i < cand_count; i++) {
+        size_t entry_idx = candidates[i].idx;
         GV_PQEntry *entry = &idx->entries[entry_idx];
 
-        /* Create result vector with exact distance if needed */
+        GV_Vector temp_vec = {
+            .data = entry->raw_data,
+            .dimension = idx->dimension,
+            .metadata = NULL
+        };
+        float exact_dist = gv_distance(&temp_vec, query, distance_type);
+        if (exact_dist >= 0.0f) {
+            candidates[i].dist = exact_dist;
+        }
+    }
+
+    /* Sort by exact distance */
+    for (size_t i = 0; i + 1 < cand_count; i++) {
+        size_t minj = i;
+        for (size_t j = i + 1; j < cand_count; j++) {
+            if (candidates[j].dist < candidates[minj].dist) minj = j;
+        }
+        if (minj != i) {
+            GV_PQHeapItem tmp = candidates[i];
+            candidates[i] = candidates[minj];
+            candidates[minj] = tmp;
+        }
+    }
+
+    /* Build result array from top-k */
+    int n = (int)(cand_count < k ? cand_count : k);
+    for (int i = 0; i < n; i++) {
+        size_t entry_idx = candidates[i].idx;
+        GV_PQEntry *entry = &idx->entries[entry_idx];
+
         GV_Vector *result_vec = gv_vector_create_from_data(idx->dimension, entry->raw_data);
         if (result_vec) {
-            /* Copy metadata */
             GV_Metadata *cur = entry->metadata;
             while (cur) {
                 if (cur->key && cur->value) {
@@ -436,44 +488,21 @@ int gv_pq_search(void *index, const GV_Vector *query, size_t k,
                 cur = cur->next;
             }
 
-            /* Compute exact distance for reranking */
-            float exact_dist = gv_distance(query, result_vec, distance_type);
-
             results[i].vector = result_vec;
-            results[i].distance = exact_dist;
+            results[i].distance = candidates[i].dist;
             results[i].is_sparse = 0;
             results[i].sparse_vector = NULL;
             results[i].id = entry_idx;
         } else {
             results[i].vector = NULL;
-            results[i].distance = approx_dist;
+            results[i].distance = candidates[i].dist;
             results[i].is_sparse = 0;
             results[i].sparse_vector = NULL;
             results[i].id = entry_idx;
         }
-
-        /* Remove from heap */
-        heap[0] = heap[heap_size - 1];
-        heap_size--;
-        if (heap_size > 0) {
-            gv_pq_heap_sift_down(heap, heap_size, 0);
-        }
     }
 
-    free(heap);
-    free(distance_table);
-
-    /* Re-sort by exact distance for better accuracy */
-    for (int i = 0; i < n - 1; i++) {
-        for (int j = i + 1; j < n; j++) {
-            if (results[i].distance > results[j].distance) {
-                GV_SearchResult tmp = results[i];
-                results[i] = results[j];
-                results[j] = tmp;
-            }
-        }
-    }
-
+    free(candidates);
     return n;
 }
 
@@ -497,7 +526,7 @@ int gv_pq_range_search(void *index, const GV_Vector *query, float radius,
         const float *subcodebook = &idx->codebooks[m_i * idx->ksub * idx->dsub];
 
         for (size_t k_i = 0; k_i < idx->ksub; k_i++) {
-            float dist = gv_pq_subvec_distance(query_subvec, &subcodebook[k_i * idx->dsub], idx->dsub);
+            float dist = gv_pq_subvec_distance_sq(query_subvec, &subcodebook[k_i * idx->dsub], idx->dsub);
             distance_table[m_i * idx->ksub + k_i] = dist * dist;
         }
     }
