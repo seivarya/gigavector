@@ -105,6 +105,7 @@ typedef struct {
     size_t num_tables;
     size_t num_hash_bits;
     uint64_t seed;
+    float bucket_width;
 } GV_LSHConfig;
 
 typedef struct GV_Metadata {
