@@ -1,3 +1,4 @@
+#include <float.h>
 #include <math.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -354,11 +355,11 @@ void *gv_ivfpq_create(size_t dimension, const GV_IVFPQConfig *config) {
     idx->m = (config && config->m) ? config->m : def_m;
     idx->nbits = (config && config->nbits) ? config->nbits : 8;
     idx->nprobe = (config && config->nprobe) ? config->nprobe : 4;
-    idx->train_iters = (config && config->train_iters) ? config->train_iters : 15;
-    idx->default_rerank = (config && config->default_rerank) ? config->default_rerank : 32;
+    idx->train_iters = (config && config->train_iters) ? config->train_iters : 25;
+    idx->default_rerank = (config && config->default_rerank) ? config->default_rerank : 200;
     idx->use_cosine = (config ? config->use_cosine : 0);
     idx->use_scalar_quant = (config && config->use_scalar_quant) ? 1 : 0;
-    idx->oversampling_factor = (config && config->oversampling_factor > 0.0f) ? config->oversampling_factor : 1.0f;
+    idx->oversampling_factor = (config && config->oversampling_factor > 0.0f) ? config->oversampling_factor : 3.0f;
     if (idx->use_scalar_quant && config) {
         idx->scalar_quant_config = config->scalar_quant_config;
         idx->scalar_quant_template = NULL;
@@ -565,22 +566,35 @@ int gv_ivfpq_insert(void *index_ptr, GV_Vector *vector) {
     GV_IVFPQList *list = &idx->lists[list_id];
     pthread_mutex_lock(&idx->list_mutex[list_id]);
     if (list->count >= list->capacity) {
-        size_t newcap = list->capacity ? list->capacity * 2 : 16;
+        size_t oldcap = list->capacity;
+        size_t newcap = oldcap ? oldcap * 2 : 16;
         GV_IVFPQEntry *newents = (GV_IVFPQEntry *)realloc(list->entries, newcap * sizeof(GV_IVFPQEntry));
-        uint8_t *newcodes = (uint8_t *)realloc(list->codes_soa, newcap * idx->m * sizeof(uint8_t));
         if (!newents) {
             free(codes);
             pthread_mutex_unlock(&idx->list_mutex[list_id]);
             pthread_rwlock_unlock(&idx->rwlock);
             return -1;
         }
+        list->entries = newents;
+        /* Allocate new SoA buffer and reorganize from old stride to new stride.
+         * Old layout: codes_soa[m * oldcap + e]
+         * New layout: codes_soa[m * newcap + e]
+         * We must copy each subquantizer's block to its new offset. */
+        uint8_t *newcodes = (uint8_t *)malloc(newcap * idx->m * sizeof(uint8_t));
         if (!newcodes) {
             free(codes);
             pthread_mutex_unlock(&idx->list_mutex[list_id]);
             pthread_rwlock_unlock(&idx->rwlock);
             return -1;
         }
-        list->entries = newents;
+        if (list->codes_soa != NULL && oldcap > 0 && list->count > 0) {
+            for (size_t m = 0; m < idx->m; ++m) {
+                memcpy(newcodes + m * newcap,
+                       list->codes_soa + m * oldcap,
+                       list->count * sizeof(uint8_t));
+            }
+        }
+        free(list->codes_soa);
         list->codes_soa = newcodes;
         list->capacity = newcap;
     }
@@ -675,7 +689,16 @@ int gv_ivfpq_search(void *index_ptr, const GV_Vector *query, size_t k,
     /* coarse scores + heap-select top nprobe */
     size_t nprobe = (nprobe_override > 0) ? nprobe_override : idx->nprobe;
     if (nprobe > idx->nlist) nprobe = idx->nlist;
-    GV_IVFPQHeapItem *cheap = (GV_IVFPQHeapItem *)malloc(nprobe * sizeof(GV_IVFPQHeapItem));
+
+    /* --- Stack-allocate small buffers to avoid per-query malloc --- */
+    /* Max 256 probes, 256 dim, 64 subquantizers * 256 codebook = 16384 LUT entries */
+    #define IVFPQ_MAX_STACK_PROBES 256
+    #define IVFPQ_MAX_STACK_DIM    1024
+    #define IVFPQ_MAX_STACK_LUT    (64 * 256)
+    #define IVFPQ_MAX_STACK_RERANK 512
+
+    GV_IVFPQHeapItem cheap_stack[IVFPQ_MAX_STACK_PROBES];
+    GV_IVFPQHeapItem *cheap = (nprobe <= IVFPQ_MAX_STACK_PROBES) ? cheap_stack : (GV_IVFPQHeapItem *)malloc(nprobe * sizeof(GV_IVFPQHeapItem));
     size_t chsize = 0;
     if (!cheap) {
         pthread_rwlock_unlock(&idx->rwlock);
@@ -694,9 +717,10 @@ int gv_ivfpq_search(void *index_ptr, const GV_Vector *query, size_t k,
             gv_ivfpq_heap_sift_down(cheap, chsize, 0);
         }
     }
-    int *probe_ids = (int *)malloc(nprobe * sizeof(int));
+    int probe_ids_stack[IVFPQ_MAX_STACK_PROBES];
+    int *probe_ids = (nprobe <= IVFPQ_MAX_STACK_PROBES) ? probe_ids_stack : (int *)malloc(nprobe * sizeof(int));
     if (!probe_ids) {
-        free(cheap);
+        if (cheap != cheap_stack) free(cheap);
         pthread_rwlock_unlock(&idx->rwlock);
         return -1;
     }
@@ -706,26 +730,30 @@ int gv_ivfpq_search(void *index_ptr, const GV_Vector *query, size_t k,
         chsize--;
         if (chsize > 0) gv_ivfpq_heap_sift_down(cheap, chsize, 0);
     }
-    free(cheap);
+    if (cheap != cheap_stack) free(cheap);
 
-    /* allocate thread-local LUT buffer (not shared idx->lut_buf, which races under rdlock) */
+    /* LUT buffer — stack if small enough */
     size_t lut_need = idx->m * idx->codebook_size;
-    float *lut = (float *)malloc(lut_need * sizeof(float));
+    float lut_stack[IVFPQ_MAX_STACK_LUT];
+    float *lut = (lut_need <= IVFPQ_MAX_STACK_LUT) ? lut_stack : (float *)malloc(lut_need * sizeof(float));
     if (!lut) {
-        free(probe_ids);
+        if (probe_ids != probe_ids_stack) free(probe_ids);
         pthread_rwlock_unlock(&idx->rwlock);
         return -1;
     }
 
-    /* Allocate residual buffer for ADC: query_residual = query - coarse_centroid */
-    float *qres = (float *)malloc(idx->dimension * sizeof(float));
+    /* Residual buffer — stack if small enough */
+    float qres_stack[IVFPQ_MAX_STACK_DIM];
+    float *qres = (idx->dimension <= IVFPQ_MAX_STACK_DIM) ? qres_stack : (float *)malloc(idx->dimension * sizeof(float));
     if (!qres) {
-        free(probe_ids);
+        if (lut != lut_stack) free(lut);
+        if (probe_ids != probe_ids_stack) free(probe_ids);
         pthread_rwlock_unlock(&idx->rwlock);
         return -1;
     }
 
     /* cosine: normalize query once */
+    float qbuf_stack[IVFPQ_MAX_STACK_DIM];
     float *qbuf = NULL;
     const float *qdata = query->data;
     if (idx->use_cosine || cosine) {
@@ -733,10 +761,11 @@ int gv_ivfpq_search(void *index_ptr, const GV_Vector *query, size_t k,
         for (size_t i = 0; i < idx->dimension; ++i) norm += query->data[i] * query->data[i];
         if (norm > 0.0f) {
             norm = 1.0f / sqrtf(norm);
-            qbuf = (float *)malloc(idx->dimension * sizeof(float));
+            qbuf = (idx->dimension <= IVFPQ_MAX_STACK_DIM) ? qbuf_stack : (float *)malloc(idx->dimension * sizeof(float));
             if (!qbuf) {
-                free(qres);
-                free(probe_ids);
+                if (qres != qres_stack) free(qres);
+                if (lut != lut_stack) free(lut);
+                if (probe_ids != probe_ids_stack) free(probe_ids);
                 pthread_rwlock_unlock(&idx->rwlock);
                 return -1;
             }
@@ -745,132 +774,154 @@ int gv_ivfpq_search(void *index_ptr, const GV_Vector *query, size_t k,
         }
     }
 
-    /* Calculate oversampled candidate count */
+    /* Calculate oversampled candidate count — must be >= rerank target */
     size_t oversampled_k = (size_t)(k * idx->oversampling_factor + 0.5f);
     if (oversampled_k < k) oversampled_k = k;
+    size_t rr_target = (rerank_top > 0) ? rerank_top : idx->default_rerank;
+    if (rr_target > oversampled_k) oversampled_k = rr_target;
 
     /* bounded max-heap for top-k (or oversampled-k) */
-    GV_IVFPQHeapItem *heap = (GV_IVFPQHeapItem *)malloc(oversampled_k * sizeof(GV_IVFPQHeapItem));
+    GV_IVFPQHeapItem heap_stack[IVFPQ_MAX_STACK_RERANK];
+    GV_IVFPQHeapItem *heap = (oversampled_k <= IVFPQ_MAX_STACK_RERANK) ? heap_stack : (GV_IVFPQHeapItem *)malloc(oversampled_k * sizeof(GV_IVFPQHeapItem));
     size_t hsize = 0;
     if (!heap) {
-        free(qres);
-        free(qbuf);
-        free(probe_ids);
+        if (qbuf && qbuf != qbuf_stack) free(qbuf);
+        if (qres != qres_stack) free(qres);
+        if (lut != lut_stack) free(lut);
+        if (probe_ids != probe_ids_stack) free(probe_ids);
         pthread_rwlock_unlock(&idx->rwlock);
         return -1;
     }
+
+    /* Cache struct fields as locals for the hot loop */
+    const size_t idx_m = idx->m;
+    const size_t idx_subdim = idx->subdim;
+    const size_t idx_cbsz = idx->codebook_size;
+    const size_t idx_dim = idx->dimension;
 
     for (size_t pi = 0; pi < nprobe; ++pi) {
         int lid = probe_ids[pi];
         if (lid < 0) continue;
 
         /* Compute query residual for this probe: qres = query - coarse_centroid[lid] */
-        const float *centroid = idx->coarse + lid * idx->dimension;
-        for (size_t j = 0; j < idx->dimension; ++j) {
+        const float *centroid = idx->coarse + lid * idx_dim;
+        for (size_t j = 0; j < idx_dim; ++j) {
             qres[j] = qdata[j] - centroid[j];
         }
 
-        /* Compute LUT from query residual (ADC) */
-        for (size_t m = 0; m < idx->m; ++m) {
-            const float *cb = idx->pq + m * idx->codebook_size * idx->subdim;
-            const float *subq = qres + m * idx->subdim;
-            float *lut_row = lut + m * idx->codebook_size;
-            for (size_t c = 0; c < idx->codebook_size; ++c) {
-                const float *code = cb + c * idx->subdim;
-                float d;
-                if (cosine) {
-                    float dot = gv_ivfpq_dot_runtime(subq, code, idx->subdim);
-                    float cq = gv_ivfpq_dot_runtime(code, code, idx->subdim);
+        /* Compute LUT from query residual (ADC).
+         * Use scalar L2 directly — subdim is small (4-16), runtime dispatch overhead dominates. */
+        for (size_t m = 0; m < idx_m; ++m) {
+            const float *cb = idx->pq + m * idx_cbsz * idx_subdim;
+            const float *subq = qres + m * idx_subdim;
+            float *lut_row = lut + m * idx_cbsz;
+            if (cosine) {
+                for (size_t c = 0; c < idx_cbsz; ++c) {
+                    const float *code = cb + c * idx_subdim;
+                    float dot = 0.0f, cq = 0.0f;
+                    for (size_t s = 0; s < idx_subdim; ++s) {
+                        dot += subq[s] * code[s];
+                        cq += code[s] * code[s];
+                    }
                     float denom = sqrtf(cq);
-                    d = (denom > 0.0f) ? (1.0f - dot / denom) : 1.0f;
-                } else {
-                    d = gv_ivfpq_l2_runtime(subq, code, idx->subdim);
-                }
-                lut_row[c] = d;
-            }
-        }
-            GV_IVFPQList *list = &idx->lists[lid];
-            const uint8_t *codes_soa = list->codes_soa;
-            size_t lcount = list->count;
-            if (codes_soa) {
-                const size_t cap = list->capacity;
-                for (size_t e = 0; e < lcount; ++e) {
-                    float d = 0.0f;
-                    const uint8_t *base = codes_soa + e;
-                    size_t m = 0;
-                    /* unroll by 4 for better ILP */
-                    for (; m + 4 <= idx->m; m += 4) {
-                        /* Prefetch upcoming codes/LUT rows to hide latency */
-                        if (m + 8 < idx->m) {
-                            __builtin_prefetch(base + (m + 8) * cap, 0, 1);
-                            __builtin_prefetch(lut + (m + 8) * idx->codebook_size, 0, 1);
-                        }
-                        d += lut[(m + 0) * idx->codebook_size + base[(m + 0) * cap]];
-                        d += lut[(m + 1) * idx->codebook_size + base[(m + 1) * cap]];
-                        d += lut[(m + 2) * idx->codebook_size + base[(m + 2) * cap]];
-                        d += lut[(m + 3) * idx->codebook_size + base[(m + 3) * cap]];
-                    }
-                    for (; m < idx->m; ++m) {
-                        d += lut[m * idx->codebook_size + base[m * cap]];
-                    }
-                    GV_IVFPQEntry *ent = &list->entries[e];
-                    if (ent->deleted != 0) continue;
-                    if (hsize < oversampled_k) {
-                        heap[hsize].dist = d;
-                        heap[hsize].entry = ent;
-                        gv_ivfpq_heap_sift_up(heap, hsize);
-                        hsize++;
-                    } else if (d < heap[0].dist) {
-                        heap[0].dist = d;
-                        heap[0].entry = ent;
-                        gv_ivfpq_heap_sift_down(heap, hsize, 0);
-                    }
+                    lut_row[c] = (denom > 0.0f) ? (1.0f - dot / denom) : 1.0f;
                 }
             } else {
-                for (size_t e = 0; e < lcount; ++e) {
-                    GV_IVFPQEntry *ent = &list->entries[e];
-                    if (ent->deleted != 0) continue;
+                for (size_t c = 0; c < idx_cbsz; ++c) {
+                    const float *code = cb + c * idx_subdim;
                     float d = 0.0f;
-                    size_t m = 0;
-                    for (; m + 4 <= idx->m; m += 4) {
-                        if (m + 8 < idx->m) {
-                            __builtin_prefetch(ent->codes + m + 8, 0, 1);
-                            __builtin_prefetch(lut + (m + 8) * idx->codebook_size, 0, 1);
-                        }
-                        d += lut[(m + 0) * idx->codebook_size + ent->codes[m + 0]];
-                        d += lut[(m + 1) * idx->codebook_size + ent->codes[m + 1]];
-                        d += lut[(m + 2) * idx->codebook_size + ent->codes[m + 2]];
-                        d += lut[(m + 3) * idx->codebook_size + ent->codes[m + 3]];
+                    for (size_t s = 0; s < idx_subdim; ++s) {
+                        float diff = subq[s] - code[s];
+                        d += diff * diff;
                     }
-                    for (; m < idx->m; ++m) {
-                        d += lut[m * idx->codebook_size + ent->codes[m]];
-                    }
-                    if (hsize < oversampled_k) {
-                        heap[hsize].dist = d;
-                        heap[hsize].entry = ent;
-                        gv_ivfpq_heap_sift_up(heap, hsize);
-                        hsize++;
-                    } else if (d < heap[0].dist) {
-                        heap[0].dist = d;
-                        heap[0].entry = ent;
-                        gv_ivfpq_heap_sift_down(heap, hsize, 0);
-                    }
+                    lut_row[c] = d;
                 }
             }
+        }
+
+        GV_IVFPQList *list = &idx->lists[lid];
+        const uint8_t *codes_soa = list->codes_soa;
+        size_t lcount = list->count;
+        if (codes_soa) {
+            const size_t cap = list->capacity;
+            const GV_IVFPQEntry *entries = list->entries;
+            /* Heap threshold for early rejection */
+            float heap_top = (hsize >= oversampled_k) ? heap[0].dist : FLT_MAX;
+            for (size_t e = 0; e < lcount; ++e) {
+                if (entries[e].deleted != 0) continue;
+                /* Prefetch next entry's codes */
+                if (e + 1 < lcount) {
+                    __builtin_prefetch(codes_soa + (e + 1), 0, 0);
+                }
+                const uint8_t *base = codes_soa + e;
+                float d = 0.0f;
+                size_t m = 0;
+                /* unroll by 4 for better ILP */
+                for (; m + 4 <= idx_m; m += 4) {
+                    d += lut[(m + 0) * idx_cbsz + base[(m + 0) * cap]];
+                    d += lut[(m + 1) * idx_cbsz + base[(m + 1) * cap]];
+                    d += lut[(m + 2) * idx_cbsz + base[(m + 2) * cap]];
+                    d += lut[(m + 3) * idx_cbsz + base[(m + 3) * cap]];
+                }
+                for (; m < idx_m; ++m) {
+                    d += lut[m * idx_cbsz + base[m * cap]];
+                }
+                if (hsize < oversampled_k) {
+                    heap[hsize].dist = d;
+                    heap[hsize].entry = (GV_IVFPQEntry *)&entries[e];
+                    gv_ivfpq_heap_sift_up(heap, hsize);
+                    hsize++;
+                    if (hsize == oversampled_k) heap_top = heap[0].dist;
+                } else if (d < heap_top) {
+                    heap[0].dist = d;
+                    heap[0].entry = (GV_IVFPQEntry *)&entries[e];
+                    gv_ivfpq_heap_sift_down(heap, hsize, 0);
+                    heap_top = heap[0].dist;
+                }
+            }
+        } else {
+            for (size_t e = 0; e < lcount; ++e) {
+                GV_IVFPQEntry *ent = &list->entries[e];
+                if (ent->deleted != 0) continue;
+                float d = 0.0f;
+                size_t m = 0;
+                for (; m + 4 <= idx_m; m += 4) {
+                    d += lut[(m + 0) * idx_cbsz + ent->codes[m + 0]];
+                    d += lut[(m + 1) * idx_cbsz + ent->codes[m + 1]];
+                    d += lut[(m + 2) * idx_cbsz + ent->codes[m + 2]];
+                    d += lut[(m + 3) * idx_cbsz + ent->codes[m + 3]];
+                }
+                for (; m < idx_m; ++m) {
+                    d += lut[m * idx_cbsz + ent->codes[m]];
+                }
+                if (hsize < oversampled_k) {
+                    heap[hsize].dist = d;
+                    heap[hsize].entry = ent;
+                    gv_ivfpq_heap_sift_up(heap, hsize);
+                    hsize++;
+                } else if (d < heap[0].dist) {
+                    heap[0].dist = d;
+                    heap[0].entry = ent;
+                    gv_ivfpq_heap_sift_down(heap, hsize, 0);
+                }
+            }
+        }
     }
 
     /* extract heap into arrays sorted ascending */
     size_t found = hsize;
-    float *bestd = (float *)malloc(found * sizeof(float));
-    GV_IVFPQEntry **beste = (GV_IVFPQEntry **)malloc(found * sizeof(GV_IVFPQEntry *));
+    float bestd_stack[IVFPQ_MAX_STACK_RERANK];
+    GV_IVFPQEntry *beste_stack[IVFPQ_MAX_STACK_RERANK];
+    float *bestd = (found <= IVFPQ_MAX_STACK_RERANK) ? bestd_stack : (float *)malloc(found * sizeof(float));
+    GV_IVFPQEntry **beste = (found <= IVFPQ_MAX_STACK_RERANK) ? beste_stack : (GV_IVFPQEntry **)malloc(found * sizeof(GV_IVFPQEntry *));
     if (!bestd || !beste) {
-        free(heap);
-        free(lut);
-        free(qres);
-        free(qbuf);
-        free(probe_ids);
-        free(bestd);
-        free(beste);
+        if (heap != heap_stack) free(heap);
+        if (lut != lut_stack) free(lut);
+        if (qres != qres_stack) free(qres);
+        if (qbuf && qbuf != qbuf_stack) free(qbuf);
+        if (probe_ids != probe_ids_stack) free(probe_ids);
+        if (bestd != bestd_stack) free(bestd);
+        if (beste != (GV_IVFPQEntry **)beste_stack) free(beste);
         pthread_rwlock_unlock(&idx->rwlock);
         return -1;
     }
@@ -881,46 +932,50 @@ int gv_ivfpq_search(void *index_ptr, const GV_Vector *query, size_t k,
         hsize--;
         if (hsize > 0) gv_ivfpq_heap_sift_down(heap, hsize, 0);
     }
-    free(heap);
 
-    /* Optional rerank with exact distance on oversampled candidates */
+    /* Optional rerank with exact distance using raw SIMD L2/dot */
     size_t rr = rerank_top > 0 ? rerank_top : idx->default_rerank;
     if (rr > found) rr = found;
     if (rr == 0 && idx->oversampling_factor > 1.0f) {
         rr = found;
     }
     if (rr > 0) {
-        /* Rerank oversampled candidates with exact distances */
+        const size_t dim = idx->dimension;
         for (size_t i = 0; i < rr; ++i) {
-            if (beste[i] == NULL || beste[i]->deleted != 0) continue;
-            
+            if (beste[i] == NULL || beste[i]->deleted != 0 || beste[i]->vector == NULL) continue;
+            const float *vdata = beste[i]->vector->data;
+            if (vdata == NULL) continue;
+
             float dist;
             if (idx->use_scalar_quant && beste[i]->scalar_quant != NULL) {
-                dist = gv_scalar_quant_distance(query->data, beste[i]->scalar_quant, 
+                dist = gv_scalar_quant_distance(query->data, beste[i]->scalar_quant,
                                                  (int)(cosine ? GV_DISTANCE_COSINE : GV_DISTANCE_EUCLIDEAN));
+            } else if (cosine) {
+                /* cosine distance = 1 - dot(a,b)/(|a||b|) — use raw SIMD dot */
+                float dot = gv_ivfpq_dot_runtime(qdata, vdata, dim);
+                float na = gv_ivfpq_dot_runtime(qdata, qdata, dim);
+                float nb = gv_ivfpq_dot_runtime(vdata, vdata, dim);
+                float denom = sqrtf(na * nb);
+                dist = (denom > 0.0f) ? (1.0f - dot / denom) : 1.0f;
             } else {
-                dist = gv_distance(query, beste[i]->vector, cosine ? GV_DISTANCE_COSINE : GV_DISTANCE_EUCLIDEAN);
-            }
-            
-            if (cosine && dist > -1.5f) {
-                dist = 1.0f - dist; /* convert similarity to distance */
+                dist = gv_ivfpq_l2_runtime(qdata, vdata, dim);
             }
             if (dist < 0) dist = bestd[i]; /* fallback */
             bestd[i] = dist;
         }
-        /* re-sort first rr */
-        for (size_t i = 0; i + 1 < rr; ++i) {
-            size_t minj = i;
-            for (size_t j = i + 1; j < rr; ++j) {
-                if (bestd[j] < bestd[minj]) minj = j;
-            }
-            if (minj != i) {
-                float td = bestd[i];
-                bestd[i] = bestd[minj];
-                bestd[minj] = td;
-                GV_IVFPQEntry *te = beste[i];
-                beste[i] = beste[minj];
-                beste[minj] = te;
+        /* Partial selection sort: find top-k from rr reranked candidates.
+         * Only k passes instead of rr passes — O(k*rr) for k=10, rr=200 = 2000 ops. */
+        {
+            size_t sel = (k < rr) ? k : rr;
+            for (size_t i = 0; i < sel; ++i) {
+                size_t minj = i;
+                for (size_t j = i + 1; j < rr; ++j) {
+                    if (bestd[j] < bestd[minj]) minj = j;
+                }
+                if (minj != i) {
+                    float td = bestd[i]; bestd[i] = bestd[minj]; bestd[minj] = td;
+                    GV_IVFPQEntry *te = beste[i]; beste[i] = beste[minj]; beste[minj] = te;
+                }
             }
         }
     }
@@ -933,12 +988,13 @@ int gv_ivfpq_search(void *index_ptr, const GV_Vector *query, size_t k,
         results[i].id = beste[i] ? beste[i]->vector_index : 0;
     }
 
-    free(probe_ids);
-    free(lut);
-    free(bestd);
-    free(beste);
-    free(qres);
-    free(qbuf);
+    if (probe_ids != probe_ids_stack) free(probe_ids);
+    if (lut != lut_stack) free(lut);
+    if (bestd != bestd_stack) free(bestd);
+    if (beste != (GV_IVFPQEntry **)beste_stack) free(beste);
+    if (qres != qres_stack) free(qres);
+    if (qbuf && qbuf != qbuf_stack) free(qbuf);
+    if (heap != heap_stack) free(heap);
     pthread_rwlock_unlock(&idx->rwlock);
     return (int)result_count;
 }
