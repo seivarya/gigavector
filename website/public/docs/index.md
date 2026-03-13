@@ -77,12 +77,12 @@ Use `suggest_index()` for automatic selection based on your data characteristics
 
 ## Explore the Docs
 
-- **[Usage Guide](/docs/usage)** -- Get up and running
-- **[Python Bindings](/docs/python_bindings)** -- Full Python API docs
-- **[C API Guide](/docs/c_api_guide)** -- C usage patterns
-- **[API Reference](/docs/api_reference)** -- Complete reference
-- **[Architecture](/docs/architecture)** -- System design & internals
-- **[Performance Tuning](/docs/performance)** -- Index selection & optimization
-- **[Deployment](/docs/deployment)** -- Production scaling
-- **[Security](/docs/security)** -- Auth, RBAC & best practices
-- **[Advanced Features](/docs/advanced_features)** -- Advanced patterns & examples
+- **[Usage Guide](/docs/usage)** Get up and running
+- **[Python Bindings](/docs/python_bindings)** Full Python API docs
+- **[C API Guide](/docs/c_api_guide)** C usage patterns
+- **[API Reference](/docs/api_reference)** Complete reference
+- **[Architecture](/docs/architecture)** System design & internals
+- **[Performance Tuning](/docs/performance)** Index selection & optimization
+- **[Deployment](/docs/deployment)** Production scaling
+- **[Security](/docs/security)** Auth, RBAC & best practices
+- **[Advanced Features](/docs/advanced_features)** Advanced patterns & examples
