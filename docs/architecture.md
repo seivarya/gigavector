@@ -29,17 +29,9 @@ HNSW is a graph-based approximate nearest neighbor algorithm that builds a hiera
 
 #### How It Works
 
-```
-Level 2:    [A] -------- [B]
-             |
-Level 1:    [A] -- [C] -- [B] -- [D]
-             |      |      |      |
-Level 0:    [A]-[E]-[C]-[F]-[B]-[G]-[D]-[H]
-```
-
-1. **Hierarchy**: Vectors are inserted at multiple levels with decreasing probability
-2. **Navigation**: Search starts at top level, greedily navigates to nearest neighbor
-3. **Refinement**: Descends through levels, refining results at each layer
+1. **Hierarchy**: Vectors are inserted at multiple levels with decreasing probability. Higher levels are sparse (few nodes, long-range links), lower levels are dense (all nodes, short-range links).
+2. **Navigation**: Search starts at the top level and greedily navigates to the nearest neighbor at each level.
+3. **Refinement**: Descends through levels, expanding the candidate set at each layer until reaching level 0.
 
 #### Configuration
 
@@ -143,15 +135,7 @@ K-D Tree is a space-partitioning data structure for exact nearest neighbor searc
 
 #### How It Works
 
-```
-                    [x=5]
-                   /     \
-              [y=3]       [y=7]
-             /    \      /    \
-          [x=2]  [x=4] [x=6] [x=8]
-```
-
-Each level splits space along alternating dimensions.
+Each level of the tree splits space along alternating dimensions. For example, the root splits on x, its children split on y, and so on. Search prunes branches whose bounding regions are farther than the current best.
 
 #### When to Use
 

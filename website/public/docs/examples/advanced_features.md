@@ -496,4 +496,3 @@ hits_cosine = db.search(query, k=10, distance=DistanceType.COSINE)
 ```
 
 These advanced features enable you to optimize GigaVector for your specific use case. For more details on performance tuning, see the [Performance Tuning Guide](../performance.md).
-

@@ -795,4 +795,3 @@ print(f"Vector limit: {limits['max_vectors']}")
 ```
 
 For more information, see the [Python Bindings Guide](python_bindings.md) and [C API Guide](c_api_guide.md).
-

@@ -371,4 +371,3 @@ With proper tuning and SIMD optimizations:
 7. **Balance trade-offs:** Optimize for your specific accuracy/speed/memory requirements
 
 For specific tuning questions, refer to the API documentation or run benchmarks with your data to find optimal parameters.
-
