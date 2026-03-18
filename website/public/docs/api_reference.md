@@ -1500,4 +1500,3 @@ Saves database snapshot. WAL is automatically replayed on next open.
 ---
 
 For more examples, see [Basic Usage Examples](examples/basic_usage.md) and [Advanced Features](examples/advanced_features.md).
-
