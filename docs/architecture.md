@@ -598,7 +598,7 @@ GV_LLMMessage messages[] = {
     {"user", conversation_text}
 };
 GV_LLMResponse response;
-int result = gv_llm_generate_response(llm, messages, 2, &response);
+int result = gv_llm_generate_response(llm, messages, 2, NULL, &response);
 
 if (result == 0) {
     printf("Response: %s\n", response.content);

@@ -78,11 +78,11 @@ Range search finds all vectors within a specified distance threshold.
 ```c
 // Range search: find all vectors within radius 0.5
 float radius = 0.5f;
-GV_SearchResult results[1000];  // Pre-allocated results array
+GV_SearchResult results[1000];
 size_t max_results = 1000;
 
 int found = gv_db_range_search(
-    db, query, 128, radius, results, max_results,
+    db, query, radius, results, max_results,
     GV_DISTANCE_EUCLIDEAN
 );
 
@@ -122,28 +122,23 @@ GigaVector supports sparse vectors for efficient storage of high-dimensional spa
 ### C API
 
 ```c
-// Create sparse vector
-GV_SparseVector *sparse = gv_sparse_vector_create(1000);  // 1000 dimensions
-
-// Set non-zero values
-gv_sparse_vector_set(sparse, 10, 0.5f);   // dimension 10 = 0.5
-gv_sparse_vector_set(sparse, 50, 0.3f);   // dimension 50 = 0.3
-gv_sparse_vector_set(sparse, 100, 0.8f);   // dimension 100 = 0.8
+// Define sparse vector data (indices and values arrays)
+uint32_t indices[] = {10, 50, 100};
+float values[] = {0.5f, 0.3f, 0.8f};
+size_t nnz = 3;
+size_t dimension = 1000;
 
 // Add to sparse index
 GV_Database *db = gv_db_open("sparse.db", 1000, GV_INDEX_TYPE_SPARSE);
-gv_db_add_sparse_vector(db, sparse);
+gv_db_add_sparse_vector(db, indices, values, nnz, dimension, NULL, NULL);
 
 // Search
-GV_SparseVector *query_sparse = gv_sparse_vector_create(1000);
-gv_sparse_vector_set(query_sparse, 10, 0.6f);
-gv_sparse_vector_set(query_sparse, 50, 0.4f);
+uint32_t query_indices[] = {10, 50};
+float query_values[] = {0.6f, 0.4f};
 
 GV_SearchResult results[10];
-int found = gv_db_search_sparse(db, query_sparse, 10, results, GV_DISTANCE_EUCLIDEAN);
-
-gv_sparse_vector_destroy(sparse);
-gv_sparse_vector_destroy(query_sparse);
+int found = gv_db_search_sparse(db, query_indices, query_values, 2, 10,
+                                results, GV_DISTANCE_DOT_PRODUCT);
 ```
 
 ### Python API
