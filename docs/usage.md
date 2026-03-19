@@ -437,7 +437,15 @@ feature — no libmicrohttpd or other C HTTP library is needed.
 - **Overview** -- live metrics: vector count, dimension, index type, QPS, health status (auto-refreshes every 2 s)
 - **Vectors** -- browse vectors by ID, add new vectors with metadata, delete
 - **Search** -- k-NN search form with distance metric selector and results table
+- **Visualize** -- vector space visualization
+- **Monitoring** -- real-time performance monitoring and metrics
+- **Import** -- bulk import vectors from files
+- **SQL** -- SQL query interface for structured queries
+- **Namespaces** -- manage logical namespace partitions
+- **Graph** -- graph database browser and query interface
 - **Console** -- raw REST API console with method dropdown, URL, body, and syntax-highlighted JSON response
+- **Backups** -- create and manage database backups
+- **Cluster** -- cluster topology and node management
 
 Use `serve_with_dashboard()` (shown above) or the `DashboardServer` class directly.
 

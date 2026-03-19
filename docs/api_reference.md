@@ -43,10 +43,15 @@ Opens database with custom HNSW parameters.
 **HNSW Configuration:**
 ```c
 typedef struct {
-    int M;              // Number of bi-directional links (default: 16)
-    int ef_construction; // Size of candidate list during construction (default: 200)
-    int ef_search;      // Size of candidate list during search (default: 50)
-    float level_mult;   // Level multiplier (default: 1.0)
+    size_t M;              // Connections per node (default: 16)
+    size_t efConstruction; // Candidate list size during construction (default: 200)
+    size_t efSearch;       // Candidate list size during search (default: 50)
+    size_t maxLevel;       // Max hierarchy levels (auto-calculated if 0)
+    int use_binary_quant;  // Enable binary quantization (default: 0)
+    size_t quant_rerank;   // Candidates to rerank with exact distance (0 = disable)
+    int use_acorn;         // Enable ACORN-style filtered search (default: 0)
+    size_t acorn_hops;     // ACORN exploration depth, 1-2 (default: 1)
+    GV_DistanceType distance_type; // Distance metric (default: EUCLIDEAN)
 } GV_HNSWConfig;
 ```
 
@@ -62,9 +67,16 @@ Opens database with custom IVFPQ parameters.
 **IVFPQ Configuration:**
 ```c
 typedef struct {
-    size_t n_clusters;      // Number of clusters (default: 256)
-    size_t n_subvectors;   // Number of subvectors (default: 8)
-    size_t n_bits;          // Bits per subvector (default: 8)
+    size_t nlist;              // Coarse centroids / inverted lists (default: 256)
+    size_t m;                  // Subquantizers, must divide dimension (default: 8)
+    uint8_t nbits;             // Bits per subquantizer code (default: 8)
+    size_t nprobe;             // Lists to probe during search (default: 1)
+    size_t train_iters;        // K-means iterations for codebooks
+    size_t default_rerank;     // Rerank pool size (0 = disable)
+    int use_cosine;            // Normalize query for cosine (default: 0)
+    int use_scalar_quant;      // Enable scalar quantization (default: 0)
+    GV_ScalarQuantConfig scalar_quant_config; // Scalar quant config if enabled
+    float oversampling_factor; // Candidate oversampling (default: 1.0)
 } GV_IVFPQConfig;
 ```
 
@@ -158,55 +170,62 @@ Adds a sparse vector (only for `GV_INDEX_TYPE_SPARSE`).
 #### `gv_db_search`
 
 ```c
-int gv_db_search(const GV_Database *db, const float *query, size_t k,
-                GV_DistanceType distance_type, GV_SearchResult *results);
+int gv_db_search(const GV_Database *db, const float *query_data, size_t k,
+                 GV_SearchResult *results, GV_DistanceType distance_type);
 ```
 
 Performs k-nearest neighbor search.
 
 **Parameters:**
-- `query`: Query vector
+- `query_data`: Query vector
 - `k`: Number of results to return
-- `distance_type`: `GV_DISTANCE_EUCLIDEAN` or `GV_DISTANCE_COSINE`
 - `results`: Output array (must be pre-allocated for k elements)
+- `distance_type`: `GV_DISTANCE_EUCLIDEAN` or `GV_DISTANCE_COSINE`
 
 **Returns:** Number of results found (0 to k)
 
 **Example:**
 ```c
 GV_SearchResult results[10];
-int count = gv_db_search(db, query_vector, 10, GV_DISTANCE_COSINE, results);
+int count = gv_db_search(db, query_vector, 10, results, GV_DISTANCE_COSINE);
 for (int i = 0; i < count; i++) {
     printf("Distance: %f, ID: %zu\n", results[i].distance, results[i].id);
 }
 ```
 
-#### `gv_db_search_with_filter`
+#### `gv_db_search_filtered`
 
 ```c
-int gv_db_search_with_filter(const GV_Database *db, const float *query, size_t k,
-                             GV_DistanceType distance_type, const GV_Filter *filter,
-                             GV_SearchResult *results);
+int gv_db_search_filtered(const GV_Database *db, const float *query_data, size_t k,
+                          GV_SearchResult *results, GV_DistanceType distance_type,
+                          const char *filter_key, const char *filter_value);
 ```
 
-Search with metadata filtering.
+Search with simple key-value metadata filtering.
 
-**Filter Example:**
+**Example:**
 ```c
-GV_Filter filter;
-filter.operation = GV_FILTER_EQUALS;
-filter.key = "category";
-filter.value = "article";
-int count = gv_db_search_with_filter(db, query, 10, GV_DISTANCE_COSINE, &filter, results);
+int count = gv_db_search_filtered(db, query, 10, results, GV_DISTANCE_COSINE,
+                                  "category", "article");
 ```
+
+#### `gv_db_search_with_filter_expr`
+
+```c
+int gv_db_search_with_filter_expr(const GV_Database *db, const float *query_data, size_t k,
+                                  GV_SearchResult *results, GV_DistanceType distance_type,
+                                  const char *filter_expr);
+```
+
+Search with a filter expression string (e.g., `category == "article" AND price >= "50"`).
 
 ### Range Search
 
 #### `gv_db_range_search`
 
 ```c
-int gv_db_range_search(const GV_Database *db, const float *query, float radius,
-                      GV_DistanceType distance_type, GV_SearchResult *results, size_t max_results);
+int gv_db_range_search(const GV_Database *db, const float *query_data, float radius,
+                       GV_SearchResult *results, size_t max_results, GV_DistanceType distance_type);
 ```
 
 Finds all vectors within specified radius.
@@ -221,33 +240,16 @@ Finds all vectors within specified radius.
 
 ### Filtering
 
-GigaVector supports complex metadata filtering:
+GigaVector supports metadata filtering via simple key-value matching or filter expressions:
 
 ```c
-typedef enum {
-    GV_FILTER_EQUALS,
-    GV_FILTER_NOT_EQUALS,
-    GV_FILTER_GREATER_THAN,
-    GV_FILTER_LESS_THAN,
-    GV_FILTER_IN,
-    GV_FILTER_AND,
-    GV_FILTER_OR
-} GV_FilterOperation;
+// Simple key-value filter
+int count = gv_db_search_filtered(db, query, 10, results, GV_DISTANCE_COSINE,
+                                  "category", "article");
 
-typedef struct GV_Filter {
-    GV_FilterOperation operation;
-    const char *key;
-    const char *value;
-    struct GV_Filter *left;
-    struct GV_Filter *right;
-} GV_Filter;
-```
-
-**Complex Filter Example:**
-```c
-GV_Filter filter1 = {GV_FILTER_EQUALS, "category", "article", NULL, NULL};
-GV_Filter filter2 = {GV_FILTER_GREATER_THAN, "date", "2024-01-01", NULL, NULL};
-GV_Filter and_filter = {GV_FILTER_AND, NULL, NULL, &filter1, &filter2};
+// Complex filter expression
+int count = gv_db_search_with_filter_expr(db, query, 10, results, GV_DISTANCE_COSINE,
+                                          "category == \"article\" AND date >= \"2024-01-01\"");
 ```
 
 ---
@@ -286,23 +288,24 @@ Extracts memories using LLM (more accurate, requires API key).
 
 ### Memory Storage
 
-#### `gv_memory_store`
+#### `gv_memory_add`
 
 ```c
-int gv_memory_store(GV_Database *db, const GV_MemoryCandidate *candidate,
-                   const char *memory_id, double importance_score);
+char *gv_memory_add(GV_MemoryLayer *layer, const char *content,
+                    const float *embedding, GV_MemoryMetadata *metadata);
 ```
 
-Stores a memory in the database.
+Adds a memory to the layer. Returns memory ID string (caller must free) or NULL on failure.
 
 ### Memory Retrieval
 
 #### `gv_memory_search`
 
 ```c
-int gv_memory_search(GV_Database *db, const char *query, size_t k,
-                    const GV_MemorySearchOptions *options,
-                    GV_MemoryResult *results);
+int gv_memory_search(GV_MemoryLayer *layer, const float *query_embedding,
+                     size_t k, GV_MemoryResult *results,
+                     GV_DistanceType distance_type,
+                     const GV_MemorySearchOptions *options);
 ```
 
 Searches memories with semantic similarity and temporal weighting.
