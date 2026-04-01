@@ -1,4 +1,8 @@
+import { Link } from 'react-router-dom'
+
 export default function Footer() {
+  const featuresHref = `${import.meta.env.BASE_URL}#features`
+
   return (
     <footer className="footer">
       <div>
@@ -8,8 +12,8 @@ export default function Footer() {
       <div className="footer-right">
         <a href="https://github.com/jaywyawhare/GigaVector" target="_blank" rel="noopener">GitHub</a>
         <a href="https://pypi.org/project/gigavector/" target="_blank" rel="noopener">PyPI</a>
-        <a href="#features">Features</a>
-        <a href="/docs">Docs</a>
+        <a href={featuresHref}>Features</a>
+        <Link to="/docs/index">Docs</Link>
       </div>
     </footer>
   )

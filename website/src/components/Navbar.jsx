@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Link, useLocation } from 'react-router-dom'
 import gsap from 'gsap'
 
@@ -6,6 +6,7 @@ export default function Navbar() {
   const ref = useRef(null)
   const { pathname } = useLocation()
   const isHome = pathname === '/'
+  const [mobileOpen, setMobileOpen] = useState(false)
 
   useEffect(() => {
     if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return
@@ -17,6 +18,10 @@ export default function Navbar() {
     })
     return () => ctx.revert()
   }, [])
+
+  useEffect(() => {
+    setMobileOpen(false)
+  }, [pathname])
 
   return (
     <nav ref={ref} className="nav" style={{ opacity: 0 }}>
@@ -41,6 +46,28 @@ export default function Navbar() {
       <div className="nav-right">
         <a className="btn-sm" href="https://github.com/jaywyawhare/GigaVector" target="_blank" rel="noopener">GitHub</a>
         <a className="btn-sm filled" href="https://pypi.org/project/gigavector/" target="_blank" rel="noopener">Install</a>
+        <button
+          className="nav-menu-btn"
+          aria-label="Toggle navigation menu"
+          aria-expanded={mobileOpen ? 'true' : 'false'}
+          onClick={() => setMobileOpen(v => !v)}
+        >
+          {mobileOpen ? 'Close' : 'Menu'}
+        </button>
+      </div>
+
+      <div className={`nav-mobile ${mobileOpen ? 'open' : ''}`}>
+        {isHome ? (
+          <>
+            <a href="#features">Features</a>
+            <a href="#code">Code</a>
+            <a href="#comparison">Comparison</a>
+            <a href="#performance">Performance</a>
+          </>
+        ) : null}
+        <Link to="/docs/index">Docs</Link>
+        <a href="https://github.com/jaywyawhare/GigaVector" target="_blank" rel="noopener">GitHub</a>
+        <a href="https://pypi.org/project/gigavector/" target="_blank" rel="noopener">Install</a>
       </div>
     </nav>
   )

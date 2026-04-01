@@ -62,6 +62,7 @@ const sections = [
     group: 'Examples',
     icon: '\u2261',
     items: [
+      { slug: 'basic_usage', label: 'Basic Usage', file: 'examples/basic_usage.md' },
       { slug: 'advanced_features', label: 'Advanced Features', file: 'examples/advanced_features.md' },
     ],
   },
@@ -121,14 +122,22 @@ const codeTheme = {
 
 function CodeBlock({ className, children }) {
   const [copied, setCopied] = useState(false)
+  const [copyFailed, setCopyFailed] = useState(false)
   const match = /language-(\w+)/.exec(className || '')
   const lang = match ? match[1] : ''
   const code = String(children).replace(/\n$/, '')
 
   const onCopy = useCallback(() => {
     navigator.clipboard.writeText(code)
-    setCopied(true)
-    setTimeout(() => setCopied(false), 1500)
+      .then(() => {
+        setCopyFailed(false)
+        setCopied(true)
+        setTimeout(() => setCopied(false), 1500)
+      })
+      .catch(() => {
+        setCopyFailed(true)
+        setTimeout(() => setCopyFailed(false), 1500)
+      })
   }, [code])
 
   return (
@@ -136,7 +145,7 @@ function CodeBlock({ className, children }) {
       <div className="docs-code-header">
         <span className="docs-code-lang">{lang || 'text'}</span>
         <button className="docs-code-copy" onClick={onCopy}>
-          {copied ? 'Copied!' : 'Copy'}
+          {copied ? 'Copied!' : copyFailed ? 'Failed' : 'Copy'}
         </button>
       </div>
       <SyntaxHighlighter
