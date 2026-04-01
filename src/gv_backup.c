@@ -16,6 +16,9 @@
 
 #define BACKUP_MAGIC "GVBAK"
 #define BACKUP_MAGIC_LEN 5
+#define BACKUP_CHECKSUM_LEN 64
+#define BACKUP_HEADER_FIXED_SIZE (BACKUP_MAGIC_LEN + sizeof(uint32_t) * 4 + sizeof(uint64_t) * 4)
+#define BACKUP_HEADER_SIZE (BACKUP_HEADER_FIXED_SIZE + BACKUP_CHECKSUM_LEN)
 #define BUFFER_SIZE (64 * 1024)
 
 #define BACKUP_FLAG_COMPRESSED 0x01
@@ -108,7 +111,7 @@ GV_BackupResult *gv_backup_create(GV_Database *db, const char *backup_path,
     fwrite(&zero, sizeof(zero), 1, fp);
     fwrite(&zero, sizeof(zero), 1, fp);
     char checksum_placeholder[65] = {0};
-    fwrite(checksum_placeholder, 1, 64, fp);
+    fwrite(checksum_placeholder, 1, BACKUP_CHECKSUM_LEN, fp);
 
     uint64_t data_size = 0;
     size_t dimension = gv_database_dimension(db);
@@ -150,7 +153,7 @@ GV_BackupResult *gv_backup_create(GV_Database *db, const char *backup_path,
         fp = fopen(backup_path, "r+b");
         if (fp) {
             fseek(fp, sizes_pos + 16, SEEK_SET);
-            fwrite(checksum, 1, 64, fp);
+            fwrite(checksum, 1, BACKUP_CHECKSUM_LEN, fp);
             fclose(fp);
         }
     }
@@ -158,9 +161,10 @@ GV_BackupResult *gv_backup_create(GV_Database *db, const char *backup_path,
     if (opts->verify_after) {
         GV_BackupResult *verify = gv_backup_verify(backup_path, NULL);
         if (!verify->success) {
-            char *err = verify->error_message ? strdup(verify->error_message) : strdup("Verification failed");
+            const char *err = verify->error_message ? verify->error_message : "Verification failed";
+            GV_BackupResult *r = create_result(0, err);
             gv_backup_result_free(verify);
-            return create_result(0, err);
+            return r;
         }
         gv_backup_result_free(verify);
     }
@@ -219,9 +223,10 @@ GV_BackupResult *gv_backup_restore(const char *backup_path, const char *db_path,
     if (opts->verify_checksum) {
         GV_BackupResult *verify = gv_backup_verify(backup_path, opts->decryption_key);
         if (!verify->success) {
-            char *err = verify->error_message ? strdup(verify->error_message) : strdup("Checksum verification failed");
+            const char *err = verify->error_message ? verify->error_message : "Checksum verification failed";
+            GV_BackupResult *r = create_result(0, err);
             gv_backup_result_free(verify);
-            return create_result(0, err);
+            return r;
         }
         gv_backup_result_free(verify);
     }
@@ -247,7 +252,7 @@ GV_BackupResult *gv_backup_restore(const char *backup_path, const char *db_path,
     fread(&header.index_type, sizeof(header.index_type), 1, fp);
     fread(&header.original_size, sizeof(header.original_size), 1, fp);
     fread(&header.compressed_size, sizeof(header.compressed_size), 1, fp);
-    fread(header.checksum, 1, 64, fp);
+    fread(header.checksum, 1, BACKUP_CHECKSUM_LEN, fp);
 
     GV_Database *db = gv_db_open(NULL, header.dimension, header.index_type);
     if (!db) {
@@ -311,9 +316,10 @@ GV_BackupResult *gv_backup_restore_to_db(const char *backup_path,
     if (opts->verify_checksum) {
         GV_BackupResult *verify = gv_backup_verify(backup_path, opts->decryption_key);
         if (!verify->success) {
-            char *err = verify->error_message ? strdup(verify->error_message) : strdup("Checksum verification failed");
+            const char *err = verify->error_message ? verify->error_message : "Checksum verification failed";
+            GV_BackupResult *r = create_result(0, err);
             gv_backup_result_free(verify);
-            return create_result(0, err);
+            return r;
         }
         gv_backup_result_free(verify);
     }
@@ -335,7 +341,7 @@ GV_BackupResult *gv_backup_restore_to_db(const char *backup_path,
         return create_result(0, "Failed to open backup file");
     }
 
-    fseek(fp, BACKUP_MAGIC_LEN + sizeof(uint32_t) * 2 + sizeof(uint64_t) * 4 + 64, SEEK_SET);
+    fseek(fp, BACKUP_HEADER_SIZE, SEEK_SET);
 
     size_t vector_size = header.dimension * sizeof(float);
     float *buffer = malloc(vector_size);
@@ -387,7 +393,7 @@ int gv_backup_read_header(const char *backup_path, GV_BackupHeader *header) {
     fread(&header->index_type, sizeof(header->index_type), 1, fp);
     fread(&header->original_size, sizeof(header->original_size), 1, fp);
     fread(&header->compressed_size, sizeof(header->compressed_size), 1, fp);
-    fread(header->checksum, 1, 64, fp);
+    fread(header->checksum, 1, BACKUP_CHECKSUM_LEN, fp);
     header->checksum[64] = '\0';
 
     fclose(fp);
@@ -439,8 +445,7 @@ GV_BackupResult *gv_backup_verify(const char *backup_path, const char *decryptio
             return create_result(0, "Failed to open backup file");
         }
 
-        size_t header_total = BACKUP_MAGIC_LEN + sizeof(uint32_t) * 2 +
-                              sizeof(uint64_t) * 4 + 64;
+        size_t header_total = BACKUP_HEADER_SIZE;
         fseek(fp, (long)header_total, SEEK_SET);
 
         size_t probe_size = header.dimension * sizeof(float);
@@ -490,8 +495,7 @@ GV_BackupResult *gv_backup_verify(const char *backup_path, const char *decryptio
     long file_size = ftell(fp);
     fclose(fp);
 
-    size_t expected_min = BACKUP_MAGIC_LEN + sizeof(uint32_t) * 2 +
-                          sizeof(uint64_t) * 4 + 64 +
+    size_t expected_min = BACKUP_HEADER_SIZE +
                           header.vector_count * header.dimension * sizeof(float);
 
     if (!(header.flags & BACKUP_FLAG_ENCRYPTED) && file_size < (long)expected_min) {
@@ -721,6 +725,9 @@ GV_BackupResult *gv_backup_merge(const char *base_backup_path,
             continue;
         }
 
+        /* Incremental header layout: magic + version + flags + created_at +
+         * vector_count + dimension + index_type + start_idx + base_created_at.
+         * No checksum field — do NOT include BACKUP_CHECKSUM_LEN here. */
         size_t header_size = BACKUP_MAGIC_LEN +
             sizeof(inc_header.version) + sizeof(inc_header.flags) +
             sizeof(inc_header.created_at) + sizeof(inc_header.vector_count) +
@@ -769,8 +776,7 @@ int gv_backup_compute_checksum(const char *backup_path, char *checksum_out) {
     long file_size = ftell(fp);
     fseek(fp, 0, SEEK_SET);
 
-    size_t header_size = BACKUP_MAGIC_LEN + sizeof(uint32_t) * 2 + sizeof(uint64_t) * 4;
-    size_t checksum_offset = header_size;
+    size_t checksum_offset = BACKUP_HEADER_FIXED_SIZE;
 
     unsigned char *buffer = malloc(file_size);
     if (!buffer) {
@@ -781,8 +787,8 @@ int gv_backup_compute_checksum(const char *backup_path, char *checksum_out) {
     fread(buffer, 1, file_size, fp);
     fclose(fp);
 
-    if ((size_t)file_size > checksum_offset + 64) {
-        memset(buffer + checksum_offset, 0, 64);
+    if ((size_t)file_size > checksum_offset + BACKUP_CHECKSUM_LEN) {
+        memset(buffer + checksum_offset, 0, BACKUP_CHECKSUM_LEN);
     }
 
     unsigned char hash[32];
