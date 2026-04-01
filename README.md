@@ -203,6 +203,7 @@ cd build && ctest
 - `-DBUILD_BENCHMARKS=ON/OFF` -- benchmark executables (default: ON)
 - `-DENABLE_SANITIZERS=ON/OFF` -- ASAN, TSAN, UBSAN (default: OFF)
 - `-DENABLE_COVERAGE=ON/OFF` -- code coverage (default: OFF)
+- `-DENABLE_NATIVE_OPTIMIZATIONS=ON/OFF` -- enable `-march=native -mtune=native` (default: OFF)
 
 ### Sanitizer and Coverage Testing
 ```bash
