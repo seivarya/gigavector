@@ -151,6 +151,90 @@ static int test_select_where(void) {
     return 0;
 }
 
+static int test_select_projection_list(void) {
+    GV_Database *db = create_test_db();
+    ASSERT(db != NULL, "create_test_db should succeed");
+
+    GV_SQLEngine *eng = gv_sql_create(db);
+    ASSERT(eng != NULL, "sql engine create should succeed");
+
+    GV_SQLResult result;
+    memset(&result, 0, sizeof(result));
+    int rc = gv_sql_execute(eng,
+        "SELECT category, score FROM vectors WHERE category = 'science' LIMIT 2",
+        &result);
+    ASSERT(rc == 0, "SELECT with projection list should parse and execute");
+    ASSERT(result.row_count <= 2, "should respect LIMIT");
+
+    gv_sql_free_result(&result);
+    gv_sql_destroy(eng);
+    gv_db_close(db);
+    return 0;
+}
+
+static int test_semicolon_and_not_equal_angle(void) {
+    GV_Database *db = create_test_db();
+    ASSERT(db != NULL, "create_test_db should succeed");
+
+    GV_SQLEngine *eng = gv_sql_create(db);
+    ASSERT(eng != NULL, "sql engine create should succeed");
+
+    GV_SQLResult result;
+    memset(&result, 0, sizeof(result));
+    int rc = gv_sql_execute(eng,
+        "SELECT * FROM vectors WHERE category <> 'science' LIMIT 10;",
+        &result);
+    ASSERT(rc == 0, "SELECT with <> and trailing semicolon should succeed");
+    ASSERT(result.row_count == 2, "two tech rows should match category <> science");
+
+    gv_sql_free_result(&result);
+    gv_sql_destroy(eng);
+    gv_db_close(db);
+    return 0;
+}
+
+static int test_order_by_function_syntax(void) {
+    GV_Database *db = create_test_db();
+    ASSERT(db != NULL, "create_test_db should succeed");
+
+    GV_SQLEngine *eng = gv_sql_create(db);
+    ASSERT(eng != NULL, "sql engine create should succeed");
+
+    GV_SQLResult result;
+    memset(&result, 0, sizeof(result));
+    int rc = gv_sql_execute(eng,
+        "SELECT * FROM vectors ANN(query=[1.0,0.0,0.0,0.0], k=3) "
+        "ORDER BY vector_distance(query=[1.0,0.0,0.0,0.0]) DESC LIMIT 2",
+        &result);
+    ASSERT(rc == 0, "ORDER BY function-style expression should parse");
+    ASSERT(result.row_count <= 2, "should respect LIMIT");
+
+    gv_sql_free_result(&result);
+    gv_sql_destroy(eng);
+    gv_db_close(db);
+    return 0;
+}
+
+static int test_explain_trailing_semicolon(void) {
+    GV_Database *db = create_test_db();
+    ASSERT(db != NULL, "create_test_db should succeed");
+
+    GV_SQLEngine *eng = gv_sql_create(db);
+    ASSERT(eng != NULL, "sql engine create should succeed");
+
+    char plan[1024];
+    memset(plan, 0, sizeof(plan));
+    int rc = gv_sql_explain(eng,
+        "SELECT * FROM vectors WHERE category = 'science';",
+        plan, sizeof(plan));
+    ASSERT(rc == 0, "EXPLAIN with trailing semicolon should succeed");
+    ASSERT(strlen(plan) > 0, "plan should be non-empty");
+
+    gv_sql_destroy(eng);
+    gv_db_close(db);
+    return 0;
+}
+
 typedef int (*test_fn)(void);
 typedef struct { const char *name; test_fn fn; } TestCase;
 
@@ -163,6 +247,10 @@ int main(void) {
         {"Testing sql last error...", test_last_error},
         {"Testing sql free_result empty...", test_free_result_empty},
         {"Testing sql SELECT WHERE...", test_select_where},
+        {"Testing sql SELECT projection list...", test_select_projection_list},
+        {"Testing sql semicolon and <> ...", test_semicolon_and_not_equal_angle},
+        {"Testing sql ORDER BY function syntax...", test_order_by_function_syntax},
+        {"Testing sql EXPLAIN semicolon...", test_explain_trailing_semicolon},
     };
     int n = sizeof(tests) / sizeof(tests[0]);
     int passed = 0;
