@@ -26,6 +26,18 @@ function Landing() {
   )
 }
 
+function NotFound() {
+  return (
+    <section style={{ minHeight: '60vh', display: 'grid', placeItems: 'center', textAlign: 'center' }}>
+      <div>
+        <div className="section-label">404</div>
+        <h2 className="section-heading">Page not found.</h2>
+        <p className="section-sub center">The route does not exist in this UI.</p>
+      </div>
+    </section>
+  )
+}
+
 export default function App() {
   return (
     <>
@@ -34,6 +46,7 @@ export default function App() {
         <Route path="/" element={<Landing />} />
         <Route path="/docs" element={<DocsPage />} />
         <Route path="/docs/:slug" element={<DocsPage />} />
+        <Route path="*" element={<NotFound />} />
       </Routes>
       <Footer />
     </>

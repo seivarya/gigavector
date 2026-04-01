@@ -107,8 +107,14 @@ export default function CodeShowcase() {
 
   const onCopy = useCallback(() => {
     navigator.clipboard.writeText(code[tab].plain)
-    setCopyLabel('copied')
-    setTimeout(() => setCopyLabel('copy'), 1200)
+      .then(() => {
+        setCopyLabel('copied')
+        setTimeout(() => setCopyLabel('copy'), 1200)
+      })
+      .catch(() => {
+        setCopyLabel('failed')
+        setTimeout(() => setCopyLabel('copy'), 1200)
+      })
   }, [tab])
 
   useEffect(() => {

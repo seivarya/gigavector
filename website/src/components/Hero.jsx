@@ -6,11 +6,19 @@ export default function Hero() {
   const canvasRef = useVectorScene()
   const inner = useRef(null)
   const [copied, setCopied] = useState(false)
+  const [copyFailed, setCopyFailed] = useState(false)
 
   const copy = useCallback(() => {
     navigator.clipboard.writeText('pip install gigavector')
-    setCopied(true)
-    setTimeout(() => setCopied(false), 1500)
+      .then(() => {
+        setCopyFailed(false)
+        setCopied(true)
+        setTimeout(() => setCopied(false), 1500)
+      })
+      .catch(() => {
+        setCopyFailed(true)
+        setTimeout(() => setCopyFailed(false), 1500)
+      })
   }, [])
 
   useEffect(() => {
@@ -55,7 +63,7 @@ export default function Hero() {
         </div>
 
         <button className="hero-install" style={{ opacity: 0 }} onClick={copy}>
-          {copied ? 'copied!' : '$ pip install gigavector'}
+          {copied ? 'copied!' : copyFailed ? 'copy failed' : '$ pip install gigavector'}
         </button>
       </div>
     </section>

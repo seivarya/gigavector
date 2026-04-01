@@ -1,4 +1,5 @@
 import { useEffect, useRef } from 'react'
+import { Link } from 'react-router-dom'
 import gsap from 'gsap'
 import { ScrollTrigger } from 'gsap/ScrollTrigger'
 
@@ -27,9 +28,9 @@ export default function CTA() {
         <a className="btn primary" href="https://pypi.org/project/gigavector/" target="_blank" rel="noopener">
           pip install gigavector
         </a>
-        <a className="btn" href="https://github.com/jaywyawhare/GigaVector" target="_blank" rel="noopener">
+        <Link className="btn" to="/docs/index">
           Documentation
-        </a>
+        </Link>
       </div>
     </div>
   )
