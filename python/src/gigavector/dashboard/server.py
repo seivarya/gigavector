@@ -109,6 +109,7 @@ class _Handler(BaseHTTPRequestHandler):
 
     def _send_json(self, data: Any, status: int = 200) -> None:
         body = json.dumps(data).encode()
+        self.server.record_traffic(sent_bytes=len(body))
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
         for k, v in self._cors_headers().items():
@@ -118,11 +119,14 @@ class _Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def _send_error_json(self, status: int, error: str, message: str) -> None:
+        self.server.record_error()
         self._send_json({"error": error, "message": message}, status=status)
 
     def _read_body(self) -> bytes:
         length = int(self.headers.get("Content-Length", 0))
-        return self.rfile.read(length) if length else b""
+        payload = self.rfile.read(length) if length else b""
+        self.server.record_traffic(received_bytes=len(payload))
+        return payload
 
     def _parse_json_body(self) -> dict[str, Any] | None:
         raw = self._read_body()
@@ -164,12 +168,14 @@ class _Handler(BaseHTTPRequestHandler):
         return False
 
     def do_OPTIONS(self) -> None:  # noqa: N802
+        self.server.record_request()
         self.send_response(204)
         for k, v in self._cors_headers().items():
             self.send_header(k, v)
         self.end_headers()
 
     def do_GET(self) -> None:  # noqa: N802
+        self.server.record_request()
         if self._dispatch(_GET_ROUTES):
             return
         path = self.path.split("?")[0]
@@ -178,29 +184,44 @@ class _Handler(BaseHTTPRequestHandler):
         self._send_error_json(404, "not_found", "Endpoint not found")
 
     def do_POST(self) -> None:  # noqa: N802
+        self.server.record_request()
         if self._dispatch(_POST_ROUTES):
             return
         self._send_error_json(404, "not_found", "Endpoint not found")
 
     def do_PUT(self) -> None:  # noqa: N802
-        self.do_POST()
+        self.server.record_request()
+        if self._dispatch(_POST_ROUTES):
+            return
+        self._send_error_json(404, "not_found", "Endpoint not found")
 
     def do_DELETE(self) -> None:  # noqa: N802
+        self.server.record_request()
         if self._dispatch(_DELETE_ROUTES):
             return
         self._send_error_json(404, "not_found", "Endpoint not found")
 
     def _handle_health(self) -> None:
-        self._send_json({"status": "healthy", "vector_count": self._db.count})
+        self._send_json({
+            "status": "healthy",
+            "vector_count": self._db.count,
+            "uptime_seconds": int(time.time() - self.server.start_time),
+        })
 
     def _handle_stats(self) -> None:
         stats = self._db.get_stats()
+        total_requests, error_count, sent, recv = self.server.get_server_stats()
         self._send_json({
             "total_vectors": self._db.count,
             "dimension": self._db.dimension,
             "total_inserts": stats.total_inserts,
             "total_queries": stats.total_queries,
             "total_range_queries": stats.total_range_queries,
+            "total_requests": total_requests,
+            "error_count": error_count,
+            "total_bytes_sent": sent,
+            "total_bytes_received": recv,
+            "uptime_seconds": int(time.time() - self.server.start_time),
         })
 
     def _handle_dashboard_info(self) -> None:
@@ -410,14 +431,36 @@ class _Handler(BaseHTTPRequestHandler):
         engine = self.server.get_sql_engine()
         try:
             result = engine.execute(body["query"])
+            columns = list(result.column_names or [])
+            if not columns:
+                columns = ["index", "distance", "metadata"]
+
+            def _value_for(col: str, i: int) -> Any:
+                key = col.lower()
+                if key in {"index", "id", "count", "deleted_count", "updated_count"}:
+                    return result.indices[i] if i < len(result.indices) else None
+                if key in {"distance", "score"}:
+                    return result.distances[i] if i < len(result.distances) else None
+                if key in {"metadata", "metadata_json"}:
+                    return result.metadata_jsons[i] if i < len(result.metadata_jsons) else None
+                if i < len(result.metadata_jsons):
+                    return result.metadata_jsons[i]
+                if i < len(result.distances):
+                    return result.distances[i]
+                if i < len(result.indices):
+                    return result.indices[i]
+                return None
+
+            rows: list[dict[str, Any]] = []
+            for i in range(result.row_count):
+                row: dict[str, Any] = {}
+                for col in columns:
+                    row[col] = _value_for(col, i)
+                rows.append(row)
+
             self._send_json({
-                "columns": result.column_names,
-                "rows": [
-                    {"index": result.indices[i] if i < len(result.indices) else None,
-                     "distance": result.distances[i] if i < len(result.distances) else None,
-                     "metadata": result.metadata_jsons[i] if i < len(result.metadata_jsons) else None}
-                    for i in range(result.row_count)
-                ],
+                "columns": columns,
+                "rows": rows,
                 "row_count": result.row_count,
             })
         except Exception as e:
@@ -442,6 +485,12 @@ class _Handler(BaseHTTPRequestHandler):
             path = os.path.join(tempfile.gettempdir(), f"gv_backup_{int(time.time())}.gvb")
         try:
             result = backup_create(self._db, path)
+            if not result.success:
+                return self._send_error_json(
+                    500,
+                    "backup_failed",
+                    f"Backup creation failed for path '{path}'",
+                )
             self._send_json({
                 "success": result.success,
                 "path": path,
@@ -1084,6 +1133,7 @@ class _Handler(BaseHTTPRequestHandler):
     def _handle_swagger_ui(self) -> None:
         html = _SWAGGER_HTML
         body = html.encode()
+        self.server.record_traffic(sent_bytes=len(body))
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         for k, v in self._cors_headers().items():
@@ -1127,6 +1177,7 @@ class _Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
         self.wfile.write(data)
+        self.server.record_traffic(sent_bytes=len(data))
 
 
 _ROUTE_METADATA: dict[str, dict[str, Any]] = {
@@ -1353,6 +1404,11 @@ class _DashboardHTTPServer(HTTPServer):
 
     def __init__(self, db: "Database", server_address: tuple[str, int]) -> None:
         self.db = db
+        self.start_time = time.time()
+        self.total_requests = 0
+        self.error_count = 0
+        self.total_bytes_sent = 0
+        self.total_bytes_received = 0
         self._sql_engine: Any = None
         self._graph_db: Any = None
         self._namespace_mgr: Any = None
@@ -1365,7 +1421,30 @@ class _DashboardHTTPServer(HTTPServer):
         self._snapshot_mgr: Any = None
         self._schema: Any = None
         self._lock = threading.Lock()
+        self._stats_lock = threading.Lock()
         super().__init__(server_address, _Handler)
+
+    def record_request(self) -> None:
+        with self._stats_lock:
+            self.total_requests += 1
+
+    def record_traffic(self, *, sent_bytes: int = 0, received_bytes: int = 0) -> None:
+        with self._stats_lock:
+            self.total_bytes_sent += max(0, sent_bytes)
+            self.total_bytes_received += max(0, received_bytes)
+
+    def record_error(self) -> None:
+        with self._stats_lock:
+            self.error_count += 1
+
+    def get_server_stats(self) -> tuple[int, int, int, int]:
+        with self._stats_lock:
+            return (
+                self.total_requests,
+                self.error_count,
+                self.total_bytes_sent,
+                self.total_bytes_received,
+            )
 
     def get_sql_engine(self) -> Any:
         if self._sql_engine is None:

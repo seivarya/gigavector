@@ -795,6 +795,41 @@ function showToast(msg, type) {
   clearTimeout(t._timer); t._timer = setTimeout(() => t.className = 'toast', 3000);
 }
 
+function escapeHtml(s) {
+  return String(s)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function escapeJsString(s) {
+  return String(s).replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+}
+
+async function copyText(text) {
+  try {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      await navigator.clipboard.writeText(text);
+    } else {
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      ta.setAttribute('readonly', '');
+      ta.style.position = 'fixed';
+      ta.style.left = '-9999px';
+      document.body.appendChild(ta);
+      ta.select();
+      const ok = document.execCommand('copy');
+      document.body.removeChild(ta);
+      if (!ok) throw new Error('copy failed');
+    }
+    showToast('Copied!', 'success');
+  } catch (_) {
+    showToast('Clipboard unavailable', 'error');
+  }
+}
+
 /* Tabs */
 document.querySelectorAll('.tabs').forEach(tabs => {
   tabs.querySelectorAll('.tab').forEach(tab => {
@@ -835,7 +870,7 @@ async function refreshOverview() {
     document.getElementById('ov-server-info').innerHTML = jsonHighlight(info.data);
   }
   if (stats.ok && stats.data) {
-    document.getElementById('ov-reqs').textContent = ((stats.data.total_inserts || 0) + (stats.data.total_queries || 0)).toLocaleString();
+    document.getElementById('ov-reqs').textContent = (stats.data.total_requests ?? ((stats.data.total_inserts || 0) + (stats.data.total_queries || 0))).toLocaleString();
     document.getElementById('ov-qps').textContent = stats.data.queries_per_second ?? '—';
     document.getElementById('ov-errors').textContent = (stats.data.error_count ?? 0).toLocaleString();
     document.getElementById('ov-sent').textContent = formatBytes(stats.data.total_bytes_sent);
@@ -1044,7 +1079,7 @@ function showScatterDetail(idx) {
     '<div class="detail-label">Dimension</div><div class="detail-value dim">' + pt.length + '</div>' +
     '<div class="detail-label">Projected (x, y)</div><div class="detail-value dim">' + vizData.pts[idx][0].toFixed(4) + ', ' + vizData.pts[idx][1].toFixed(4) + '</div>' +
     '<div class="detail-label">Vector Data</div><div class="detail-value" style="font-size:11px;line-height:1.6;max-height:220px;overflow-y:auto;background:var(--bg-input);padding:10px;border-radius:6px">' + vecStr + '</div>' +
-    '<button class="btn btn-sm btn-outline" style="margin-top:4px" onclick="navigator.clipboard.writeText(\'' + vecStr.replace(/'/g,"\\'") + '\');showToast(\'Copied!\',\'success\')">Copy Vector</button>';
+    '<button class="btn btn-sm btn-outline" style="margin-top:4px" onclick="copyText(\'' + escapeJsString(vecStr) + '\')">Copy Vector</button>';
 }
 
 function drawScatterWithHighlights() {
@@ -1200,7 +1235,7 @@ function showGraphDetail(idx) {
   }
   html += '<div class="detail-label">Vector Data</div>' +
     '<div class="detail-value" style="font-size:11px;line-height:1.6;max-height:180px;overflow-y:auto;background:var(--bg-input);padding:10px;border-radius:6px">' + vecStr + '</div>' +
-    '<button class="btn btn-sm btn-outline" style="margin-top:4px" onclick="navigator.clipboard.writeText(\'' + vecStr.replace(/'/g,"\\'") + '\');showToast(\'Copied!\',\'success\')">Copy Vector</button>';
+    '<button class="btn btn-sm btn-outline" style="margin-top:4px" onclick="copyText(\'' + escapeJsString(vecStr) + '\')">Copy Vector</button>';
   body.innerHTML = html;
 }
 
@@ -1360,7 +1395,18 @@ async function doRangeSearch() {
 async function consoleSend() {
   const method=document.getElementById('con-method').value, url=document.getElementById('con-url').value;
   const bodyStr=document.getElementById('con-body').value.trim();
-  const opts={method}; if (method!=='GET'&&bodyStr){opts.headers={'Content-Type':'application/json'};opts.body=bodyStr;}
+  const opts={method};
+  if (method!=='GET' && bodyStr) {
+    try {
+      JSON.parse(bodyStr);
+    } catch (e) {
+      document.getElementById('con-meta').innerHTML='<span class="status-err">INVALID JSON</span>';
+      document.getElementById('con-result').innerHTML='<span class="json-null">' + escapeHtml(String(e.message)) + '</span>';
+      return;
+    }
+    opts.headers={'Content-Type':'application/json'};
+    opts.body=bodyStr;
+  }
   const t0=performance.now(); const r=await apiCall(url,opts); const ms=(performance.now()-t0).toFixed(1);
   document.getElementById('con-meta').innerHTML='<span class="'+(r.status>=200&&r.status<400?'status-ok':'status-err')+'">'+r.status+'</span><span>'+ms+'ms</span>';
   document.getElementById('con-result').innerHTML=jsonHighlight(r.data);
@@ -1379,7 +1425,8 @@ async function quickBackup(){
   const path='/tmp/gigavector_backup_'+ts+'.gvb';
   const r=await apiCall('/api/backups',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path})});
   if(el)el.innerHTML=jsonHighlight(r.data);
-  showToast(r.ok?'Backup saved to '+path:'Backup failed',r.ok?'success':'error');
+  const ok = r.ok && (!r.data || r.data.success !== false);
+  showToast(ok?'Backup saved to '+path:'Backup failed',ok?'success':'error');
 }
 document.getElementById('con-url').addEventListener('keydown',e=>{if(e.key==='Enter')consoleSend()});
 
@@ -1474,11 +1521,16 @@ async function runSQL() {
   document.getElementById('sql-meta').textContent=r.ok?(r.data.row_count+' rows in '+ms+'ms'):('Error: '+(r.data.message||JSON.stringify(r.data)));
   if(r.ok&&r.data.columns){
     const thead=document.getElementById('sql-thead');
-    thead.innerHTML='<tr>'+r.data.columns.map(c=>'<th>'+c+'</th>').join('')+'</tr>';
+    const cols = r.data.columns || [];
+    thead.innerHTML='<tr>'+cols.map(c=>'<th>'+escapeHtml(c)+'</th>').join('')+'</tr>';
     const tbody=document.getElementById('sql-tbody');tbody.innerHTML='';
     (r.data.rows||[]).forEach(row=>{
       const tr=document.createElement('tr');
-      tr.innerHTML='<td class="mono">'+(row.index??'—')+'</td><td class="mono">'+(row.distance!=null?row.distance.toFixed(6):'—')+'</td><td class="mono">'+(row.metadata||'—')+'</td>';
+      tr.innerHTML = cols.map(c => {
+        const v = row ? row[c] : null;
+        if (typeof v === 'number') return '<td class="mono">' + v + '</td>';
+        return '<td class="mono">' + escapeHtml(v == null ? '—' : String(v)) + '</td>';
+      }).join('');
       tbody.appendChild(tr);
     });
     document.getElementById('sql-result').style.display='block';
@@ -1507,7 +1559,8 @@ async function createBackup() {
   const r=await apiCall('/api/backups',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
   const el=document.getElementById('bk-create-result');el.style.display='block';
   el.innerHTML=jsonHighlight(r.data);
-  showToast(r.ok?'Backup created':'Backup failed',r.ok?'success':'error');
+  const ok = r.ok && (!r.data || r.data.success !== false);
+  showToast(ok?'Backup created':'Backup failed',ok?'success':'error');
 }
 
 async function restoreBackup() {
@@ -1517,7 +1570,8 @@ async function restoreBackup() {
   const r=await apiCall('/api/backups/restore',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path})});
   const el=document.getElementById('bk-restore-result');el.style.display='block';
   el.innerHTML=jsonHighlight(r.data);
-  showToast(r.ok?'Restore complete':'Restore failed',r.ok?'success':'error');
+  const ok = r.ok && (!r.data || r.data.success !== false);
+  showToast(ok?'Restore complete':'Restore failed',ok?'success':'error');
 }
 
 async function readBackupHeader() {
@@ -1630,9 +1684,12 @@ async function loadNamespaces() {
   if(r.ok&&r.data.namespaces){
     if(!r.data.namespaces.length){tbody.innerHTML='';empty.textContent='No namespaces yet.';empty.style.display='block';return;}
     empty.style.display='none';
-    tbody.innerHTML=r.data.namespaces.map(ns=>
-      '<tr><td>'+ns+'</td><td><button class="btn btn-sm btn-outline" onclick="nsInfo(\''+ns+'\')">Info</button> '+
-      '<button class="btn btn-sm btn-danger" onclick="deleteNamespace(\''+ns+'\')">Delete</button></td></tr>'
+    tbody.innerHTML=r.data.namespaces.map(ns=>{
+      const escNs = escapeHtml(ns);
+      const jsNs = escapeJsString(ns);
+      return '<tr><td>'+escNs+'</td><td><button class="btn btn-sm btn-outline" onclick="nsInfo(\''+jsNs+'\')">Info</button> '+
+        '<button class="btn btn-sm btn-danger" onclick="deleteNamespace(\''+jsNs+'\')">Delete</button></td></tr>';
+    }
     ).join('');
   }
 }
