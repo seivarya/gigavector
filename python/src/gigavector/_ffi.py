@@ -12,7 +12,7 @@ if TYPE_CHECKING:
 
 ffi: FFIType = FFI()
 
-# Keep in sync with include/gigavector.h
+# Keep in sync with include/gigavector/gigavector.h
 ffi.cdef(
     """
 typedef long time_t;  // Define time_t for FFI
@@ -3068,4 +3068,3 @@ def _load_lib() -> "FFIType.CData":
 
 
 lib: "FFIType.CData" = _load_lib()
-
