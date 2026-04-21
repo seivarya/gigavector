@@ -3156,6 +3156,15 @@ class ReplicationManager:
         lib.gv_replication_free_replicas(replicas_ptr[0], count_ptr[0])
         return result
 
+    def leader_append_wal(self, entry_delta: int, byte_delta: int = 0) -> None:
+        """Advance leader WAL position after durable writes (embedded coordinator)."""
+        if entry_delta < 0 or byte_delta < 0:
+            raise ValueError("entry_delta and byte_delta must be non-negative")
+        if lib.gv_replication_leader_append_wal(
+            self._mgr, int(entry_delta), int(byte_delta)
+        ) != 0:
+            raise RuntimeError("leader_append_wal failed (not leader or invalid manager)")
+
     def sync_commit(self, timeout_ms: int = 5000) -> None:
         if lib.gv_replication_sync_commit(self._mgr, timeout_ms) != 0:
             raise RuntimeError("Sync commit failed")
