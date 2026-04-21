@@ -1293,6 +1293,7 @@ GV_ReadPolicy gv_replication_get_read_policy(GV_ReplicationManager *mgr);
 GV_Database *gv_replication_route_read(GV_ReplicationManager *mgr);
 int gv_replication_set_max_read_lag(GV_ReplicationManager *mgr, uint64_t max_lag);
 int gv_replication_register_follower_db(GV_ReplicationManager *mgr, const char *node_id, GV_Database *db);
+int gv_replication_leader_append_wal(GV_ReplicationManager *mgr, uint64_t entry_delta, uint64_t byte_delta);
 
 // Bloom Filter
 typedef struct GV_BloomFilter GV_BloomFilter;
