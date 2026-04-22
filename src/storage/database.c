@@ -1,13 +1,56 @@
 #include <errno.h>
 #include <stdint.h>
+#ifndef _WIN32
 #define _GNU_SOURCE
+#endif
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <pthread.h>
 #include <time.h>
+#ifndef _WIN32
 #include <unistd.h>
+#endif
+
+#ifdef _WIN32
+#include <windows.h>
+#ifndef ssize_t
+typedef SSIZE_T ssize_t;
+#endif
+static FILE *fmemopen(void *buf, size_t size, const char *mode) {
+    (void)mode;
+    FILE *tmp = tmpfile();
+    if (!tmp) return NULL;
+    if (fwrite(buf, 1, size, tmp) != size) { fclose(tmp); return NULL; }
+    rewind(tmp);
+    return tmp;
+}
+static ssize_t getline(char **lineptr, size_t *n, FILE *stream) {
+    if (!lineptr || !n || !stream) return -1;
+    int c;
+    size_t len = 0;
+    if (!*lineptr || *n == 0) {
+        *n = 128;
+        *lineptr = (char *)malloc(*n);
+        if (!*lineptr) return -1;
+    }
+    while ((c = fgetc(stream)) != EOF) {
+        if (len + 2 > *n) {
+            size_t newn = *n * 2;
+            char *tmp = (char *)realloc(*lineptr, newn);
+            if (!tmp) return -1;
+            *lineptr = tmp;
+            *n = newn;
+        }
+        (*lineptr)[len++] = (char)c;
+        if (c == '\n') break;
+    }
+    if (len == 0) return -1;
+    (*lineptr)[len] = '\0';
+    return (ssize_t)len;
+}
+#endif
 
 #include "core/types.h"
 
