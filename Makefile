@@ -20,7 +20,15 @@ BENCH_DIR   := $(BUILD_DIR)/bench
 LIB_NAME    := GigaVector
 LIB_VERSION := 0.8.3
 STATIC_LIB  := $(LIB_DIR)/lib$(LIB_NAME).a
-SHARED_LIB  := $(LIB_DIR)/lib$(LIB_NAME).so
+
+UNAME_S := $(shell uname -s)
+ifeq ($(UNAME_S),Darwin)
+  SHARED_LIB       := $(LIB_DIR)/lib$(LIB_NAME).dylib
+  SHARED_LIB_FLAGS := -dynamiclib
+else
+  SHARED_LIB       := $(LIB_DIR)/lib$(LIB_NAME).so
+  SHARED_LIB_FLAGS := -shared
+endif
 
 SRC_FILES   := $(shell find $(SRC_DIR) -name "*.c")
 MAIN_FILE   := main.c
@@ -65,7 +73,7 @@ $(STATIC_LIB): $(LIB_OBJS)
 
 $(SHARED_LIB): $(LIB_OBJS)
 	@mkdir -p $(LIB_DIR)
-	$(CC) -shared $(CFLAGS) $^ -o $@ $(LDFLAGS)
+	$(CC) $(SHARED_LIB_FLAGS) $(CFLAGS) $^ -o $@ $(LDFLAGS)
 	@echo "Built shared library: $@"
 
 $(OBJ_DIR)/%.o: $(SRC_DIR)/%.c
