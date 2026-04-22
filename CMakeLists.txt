@@ -104,8 +104,11 @@ else()
     message(STATUS "  GPU Acceleration: Disabled (CUDA not found)")
 endif()
 
-# Link libraries
-target_link_libraries(GigaVector PRIVATE m pthread)
+# Link libraries — m and pthread are separate on POSIX; on Windows they are
+# in the CRT / provided by MinGW's built-in runtime.
+if(NOT WIN32)
+    target_link_libraries(GigaVector PRIVATE m pthread)
+endif()
 
 # Set library properties
 set_target_properties(GigaVector PROPERTIES

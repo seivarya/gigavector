@@ -48,15 +48,25 @@ class BuildPyWithMake(build_py):
                     "-DBUILD_TESTS=OFF", "-DBUILD_BENCHMARKS=OFF",
                     "-DCMAKE_BUILD_TYPE=Release",
                 ]
+                # Allow callers to force a specific generator (e.g. MinGW Makefiles)
+                cmake_gen = env.get("CMAKE_GENERATOR", "")
+                if cmake_gen:
+                    cmake_args += ["-G", cmake_gen]
                 if combined_c_flags:
                     cmake_args.append(f"-DCMAKE_C_FLAGS={combined_c_flags}")
 
                 subprocess.check_call(cmake_args, env=env)
-                subprocess.check_call(["cmake", "--build", str(build_dir), "--config", "Release"], env=env)
+                build_cmd = ["cmake", "--build", str(build_dir), "--config", "Release"]
+                if cmake_gen:
+                    # Single-config generators (MinGW Makefiles) don't use --config
+                    build_cmd = ["cmake", "--build", str(build_dir)]
+                subprocess.check_call(build_cmd, env=env)
 
+                # MinGW prefixes the DLL with "lib"; MSVC does not.
                 candidates = [
                     build_dir / "Release" / "GigaVector.dll",
                     build_dir / "GigaVector.dll",
+                    build_dir / "libGigaVector.dll",
                 ]
                 lib_path = next((p for p in candidates if p.exists()), None)
                 if lib_path is None:
