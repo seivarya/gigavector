@@ -19,9 +19,37 @@
 #include <stdint.h>
 #include <errno.h>
 #include <fcntl.h>
-#include <unistd.h>
 #include <sys/stat.h>
 #include <time.h>
+
+#ifdef _WIN32
+#include <windows.h>
+#include <io.h>
+typedef SSIZE_T ssize_t;
+typedef long long off_t;
+static ssize_t pread(int fd, void *buf, size_t count, off_t offset) {
+    HANDLE h = (HANDLE)_get_osfhandle(fd);
+    if (h == INVALID_HANDLE_VALUE) return -1;
+    OVERLAPPED ov = {0};
+    ov.Offset     = (DWORD)(offset & 0xFFFFFFFF);
+    ov.OffsetHigh = (DWORD)((UINT64)offset >> 32);
+    DWORD nread = 0;
+    if (!ReadFile(h, buf, (DWORD)count, &nread, &ov)) return -1;
+    return (ssize_t)nread;
+}
+static ssize_t pwrite(int fd, const void *buf, size_t count, off_t offset) {
+    HANDLE h = (HANDLE)_get_osfhandle(fd);
+    if (h == INVALID_HANDLE_VALUE) return -1;
+    OVERLAPPED ov = {0};
+    ov.Offset     = (DWORD)(offset & 0xFFFFFFFF);
+    ov.OffsetHigh = (DWORD)((UINT64)offset >> 32);
+    DWORD nwritten = 0;
+    if (!WriteFile(h, buf, (DWORD)count, &nwritten, &ov)) return -1;
+    return (ssize_t)nwritten;
+}
+#else
+#include <unistd.h>
+#endif
 
 #include "index/diskann.h"
 #include "core/utils.h"
