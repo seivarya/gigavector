@@ -30,12 +30,20 @@ jobs:
         env:
           # Build CPython wheels only (no PyPy for now)
           CIBW_SKIP: "pp*"
+          # Only build 64-bit wheels across platforms.
+          CIBW_ARCHS_LINUX: "x86_64"
+          CIBW_ARCHS_WINDOWS: "AMD64"
+          CIBW_ARCHS_MACOS: "arm64"
+
           # Keep linux wheels portable (fixes WSL SIGILL from CET IBT/SHSTK)
-          HARDENING_FLAGS: "-fcf-protection=none -mno-shstk"
+          CIBW_ENVIRONMENT_LINUX: "HARDENING_FLAGS='-fcf-protection=none -mno-shstk'"
+
           # manylinux images
           CIBW_MANYLINUX_X86_64_IMAGE: "manylinux_2_28"
           # Dependencies needed to build libGigaVector.so inside the container
           CIBW_BEFORE_ALL_LINUX: "yum install -y libcurl-devel openssl-devel"
+          # Fix wheel layout before auditwheel runs (auditwheel requires platlib).
+          CIBW_REPAIR_WHEEL_COMMAND_LINUX: "python /project/python/tools/wheel_fixup_platlib.py {wheel} && auditwheel repair -w {dest_dir} {wheel}"
           # Reduce noise; repair with auditwheel to bundle non-glibc deps.
           CIBW_BUILD_VERBOSITY: "1"
         run: cibuildwheel --output-dir python/dist python
