@@ -3,7 +3,12 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifndef _WIN32
 #include <unistd.h>
+#else
+#include <io.h>
+#define fsync(fd) _commit(fd)
+#endif
 
 #include "storage/wal.h"
 #include "core/utils.h"
