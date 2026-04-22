@@ -7,24 +7,59 @@ on:
 
 jobs:
   build-and-test:
-    runs-on: ubuntu-latest
+    name: build & test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Install system dependencies
+      # ── Linux ──────────────────────────────────────────────────────────────
+      - name: Install system dependencies (Linux)
+        if: matrix.os == 'ubuntu-latest'
         run: |
           sudo apt-get update
           sudo apt-get install -y build-essential cmake libcurl4-openssl-dev
 
+      # ── macOS ──────────────────────────────────────────────────────────────
+      - name: Install system dependencies (macOS)
+        if: matrix.os == 'macos-latest'
+        run: |
+          brew install cmake curl
+
+      # ── Windows (MinGW via pre-installed MSYS2) ────────────────────────────
+      - name: Set up MinGW (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: bash
+        run: |
+          C:/msys64/usr/bin/pacman -S --noconfirm --needed \
+            mingw-w64-x86_64-gcc \
+            mingw-w64-x86_64-cmake \
+            mingw-w64-x86_64-make
+          echo "C:/msys64/mingw64/bin" >> "$GITHUB_PATH"
+
+      # ── Build (Makefile — Linux/macOS only) ───────────────────────────────
       - name: Build library with Make
+        if: matrix.os != 'windows-latest'
         run: make lib
 
-      - name: Run all C tests
+      - name: Run C tests (Make)
+        if: matrix.os != 'windows-latest'
         run: make c-test
 
-      - name: Configure CMake build
+      # ── Build (CMake — all platforms) ─────────────────────────────────────
+      - name: Configure CMake build (Linux/macOS)
+        if: matrix.os != 'windows-latest'
         run: cmake -S . -B build-cmake -DBUILD_TESTS=ON -DBUILD_BENCHMARKS=OFF
+
+      - name: Configure CMake build (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: bash
+        run: cmake -S . -B build-cmake -G "MinGW Makefiles" -DBUILD_TESTS=ON -DBUILD_BENCHMARKS=OFF
 
       - name: Build with CMake
         run: cmake --build build-cmake --parallel
@@ -32,12 +67,21 @@ jobs:
       - name: Run CMake tests
         run: ctest --test-dir build-cmake --output-on-failure --parallel
 
+      # ── Python wheel ───────────────────────────────────────────────────────
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      - name: Install Python package
+      - name: Install Python package (Linux/macOS)
+        if: matrix.os != 'windows-latest'
+        run: python -m pip install ./python
+
+      - name: Install Python package (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: bash
+        env:
+          CMAKE_GENERATOR: "MinGW Makefiles"
         run: python -m pip install ./python
 
       - name: Run Python tests
