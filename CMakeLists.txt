@@ -51,13 +51,12 @@ if(WIN32 AND BUILD_SHARED_LIBS)
     set(CMAKE_WINDOWS_EXPORT_ALL_SYMBOLS ON)
 endif()
 
-# When building with MinGW, statically link the GCC and winpthread runtimes so
-# that the resulting DLL has no dependency on libgcc_s_seh-1.dll or
-# libwinpthread-1.dll.  Users without MinGW installed can then load the DLL
-# without any extra runtime installation.
 if(MINGW)
+    set(CMAKE_FIND_LIBRARY_SUFFIXES .a .dll.a .lib)
+    set(CURL_USE_STATIC_LIBS ON)
+    set(OPENSSL_USE_STATIC_LIBS ON)
     set(CMAKE_SHARED_LINKER_FLAGS
-        "${CMAKE_SHARED_LINKER_FLAGS} -static-libgcc -Wl,-Bstatic -lpthread -Wl,-Bdynamic")
+        "${CMAKE_SHARED_LINKER_FLAGS} -static-libgcc -Wl,-Bstatic -lpthread -lcurl -lssl -lcrypto -Wl,-Bdynamic -lws2_32 -lcrypt32 -lgdi32 -lbcrypt -lwldap32")
     set(CMAKE_EXE_LINKER_FLAGS
         "${CMAKE_EXE_LINKER_FLAGS} -static-libgcc")
 endif()
