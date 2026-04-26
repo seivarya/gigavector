@@ -1157,7 +1157,7 @@ class _Handler(BaseHTTPRequestHandler):
         from gigavector.dashboard import get_static_dir
 
         static_dir = os.path.realpath(get_static_dir())
-        print(f"[DEBUG]: static_dir: {static_dir}")
+
         filepath = os.path.realpath(os.path.join(static_dir, rel_norm))
 
         # Final path-traversal safety net.

@@ -31,7 +31,7 @@ package-dir = {"" = "src"}
 packages = [
 	"gigavector",
 	"gigavector.dashboard",
-	"gigavector.dashboard.backend"
+	"gigavector.dashboard.backend",
 	]
 
 include-package-data = true
