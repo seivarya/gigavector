@@ -13,18 +13,16 @@ jobs:
       matrix:
         include:
           - os: ubuntu-latest
-          - os: macos-13
-            cibw_archs_macos: x86_64
           - os: macos-latest
             cibw_archs_macos: arm64
           - os: windows-latest
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v4.2.2
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v5.6.0
         with:
           python-version: "3.11"
 
@@ -73,7 +71,7 @@ jobs:
           python -m build -s python -o python/dist
 
       - name: Upload wheel artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v4.6.2
         with:
           name: wheels-${{ matrix.os }}-${{ matrix.cibw_archs_macos || 'native' }}
           path: python/dist/*
@@ -88,7 +86,7 @@ jobs:
       id-token: write
     steps:
       - name: Download wheel artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v4.3.0
         with:
           path: dist-artifacts
 

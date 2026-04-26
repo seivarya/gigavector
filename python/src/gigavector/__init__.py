@@ -324,9 +324,18 @@ from ._core import (
     ExpandedSearchHit,
     EntityLinker,
 )
+
 from .dashboard.backend.server import DashboardServer
+from .dashboard.server import DashboardServer
+from .async_api import AsyncDatabase
+from .pool import DatabasePool
+from .benchmark import Benchmark, BenchmarkResult
 
 __all__ = [
+    "AsyncDatabase",
+    "DatabasePool",
+    "Benchmark",
+    "BenchmarkResult",
     "Database",
     "DBStats",
     "DistanceType",
