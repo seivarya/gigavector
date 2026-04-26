@@ -590,7 +590,8 @@ int gv_ivfpq_insert(void *index_ptr, GV_Vector *vector) {
             }
         }
     }
-    
+    }
+
     for (size_t m = 0; m < idx->m; ++m) {
         list->codes_soa[m * list->capacity + list->count] = codes[m];
     }
