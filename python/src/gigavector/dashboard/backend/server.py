@@ -325,6 +325,7 @@ class _Handler(BaseHTTPRequestHandler):
             return self._send_error_json(400, "invalid_request", "Missing 'query' array")
 
         k = int(body.get("k", 10))
+
         from gigavector._core import DistanceType, IndexType
         dist_name = body.get("distance", "euclidean").upper()
         try:
@@ -1151,13 +1152,19 @@ class _Handler(BaseHTTPRequestHandler):
         elif rel.startswith("/"):
             rel = rel[1:]
 
+        rel_norm = rel.replace("\\", "/").lstrip("/")
+
         from gigavector.dashboard import get_static_dir
+
         static_dir = os.path.realpath(get_static_dir())
-        filepath = os.path.realpath(os.path.join(static_dir, rel))
+        print(f"[DEBUG]: static_dir: {static_dir}")
+        filepath = os.path.realpath(os.path.join(static_dir, rel_norm))
+
+        # Final path-traversal safety net.
         if not filepath.startswith(static_dir + os.sep) and filepath != static_dir:
             return self._send_error_json(403, "forbidden", "Path traversal not allowed")
 
-        cached = _Handler._static_cache.get(rel)
+        cached = _Handler._static_cache.get(rel_norm)
         if cached is not None:
             mime, data = cached
         else:
@@ -1168,7 +1175,7 @@ class _Handler(BaseHTTPRequestHandler):
                 mime = "application/octet-stream"
             with open(filepath, "rb") as f:
                 data = f.read()
-            _Handler._static_cache[rel] = (mime, data)
+            _Handler._static_cache[rel_norm] = (mime, data)
 
         self.send_response(200)
         self.send_header("Content-Type", mime)

@@ -1,5 +1,7 @@
 const API = window.location.origin;
 
+// utils
+
 function jsonHighlight(obj) {
   if (obj == null) return '<span class="json-null">null</span>';
   const s = typeof obj === "string" ? obj : JSON.stringify(obj, null, 2);
@@ -14,6 +16,8 @@ function jsonHighlight(obj) {
     },
   );
 }
+
+// api wrapper
 
 let activeCollection = "";
 
@@ -43,12 +47,14 @@ function formatBytes(b) {
   if (b < 1073741824) return (b / 1048576).toFixed(1) + " MB";
   return (b / 1073741824).toFixed(2) + " GB";
 }
+
 function formatUptime(s) {
   if (s == null || s < 0) return "";
   if (s < 60) return s + "s";
   if (s < 3600) return Math.floor(s / 60) + "m " + (s % 60) + "s";
   return Math.floor(s / 3600) + "h " + Math.floor((s % 3600) / 60) + "m";
 }
+
 function showToast(msg, type) {
   const t = document.getElementById("toast");
   t.textContent = msg;
@@ -92,7 +98,6 @@ async function copyText(text) {
   }
 }
 
-/* Tabs */
 document.querySelectorAll(".tabs").forEach((tabs) => {
   tabs.querySelectorAll(".tab").forEach((tab) => {
     tab.addEventListener("click", () => {
@@ -109,7 +114,6 @@ document.querySelectorAll(".tabs").forEach((tabs) => {
   });
 });
 
-/* Overview */
 let refreshTimer = null;
 async function refreshOverview() {
   const [info, stats, health] = await Promise.all([
@@ -178,7 +182,6 @@ function startRefresh() {
 }
 startRefresh();
 
-/* Points browser */
 let currentPoints = [],
   selectedPointIdx = -1;
 async function loadPoints() {
@@ -189,7 +192,7 @@ async function loadPoints() {
   );
   if (!r.ok) return;
   currentPoints = r.data.vectors || [];
-  document.getElementById("points-count").textContent = r.data.total + " total";
+  document.getElementById("points-count").textContent = `${r.data.total} total`;
   selectedPointIdx = -1;
   renderPointsList();
 }
@@ -215,56 +218,42 @@ function renderPointsList() {
   list.innerHTML = currentPoints
     .map((p, i) => {
       const d = Array.isArray(p.data)
-        ? "[" +
-          p.data
+        ? `[${p.data
             .slice(0, 5)
             .map((v) => (typeof v === "number" ? v.toFixed(4) : v))
-            .join(", ") +
-          (p.data.length > 5 ? ", …" : "") +
-          "]"
+            .join(", ")}${p.data.length > 5 ? ", …" : ""}]`
         : JSON.stringify(p.data).slice(0, 60);
-      return (
-        '<div class="point-item' +
-        (selectedPointIdx === i ? " selected" : "") +
-        '" onclick="selectPoint(' +
-        i +
-        ')">' +
-        '<div class="point-idx">' +
-        p.index +
-        '</div><div class="point-data">' +
-        d +
-        "</div>" +
-        '<div class="point-badge">' +
-        (Array.isArray(p.data) ? p.data.length + "d" : "") +
-        "</div></div>"
-      );
+      return `<div class="point-item${
+        selectedPointIdx === i ? " selected" : ""
+      }" onclick="selectPoint(${i})">
+        <div class="point-idx">${p.index}</div>
+        <div class="point-data">${d}</div>
+        <div class="point-badge">${Array.isArray(p.data) ? `${p.data.length}d` : ""}</div>
+      </div>`;
     })
     .join("");
 }
+
 function selectPoint(i) {
   selectedPointIdx = i;
   renderPointsList();
   const p = currentPoints[i];
-  document.getElementById("point-detail").innerHTML =
-    '<div style="font-family:var(--mono);font-size:12px;font-weight:600;color:var(--accent);margin-bottom:12px">Point #' +
-    p.index +
-    "</div>" +
-    '<div class="json-view" style="max-height:300px;margin-bottom:12px">' +
-    jsonHighlight(p) +
-    "</div>" +
-    '<button class="btn btn-sm btn-danger" onclick="deletePointFromBrowser(' +
-    p.index +
-    ')">Delete</button>';
+  document.getElementById("point-detail").innerHTML = `
+    <div style="font-family:var(--mono);font-size:12px;font-weight:600;color:var(--accent);margin-bottom:12px">Point #${p.index}</div>
+    <div class="json-view" style="max-height:300px;margin-bottom:12px">${jsonHighlight(p)}</div>
+    <button class="btn btn-sm btn-danger" onclick="deletePointFromBrowser(${p.index})">Delete</button>`;
 }
+
 async function deletePointFromBrowser(id) {
-  if (!confirm("Delete vector " + id + "?")) return;
-  const r = await apiCall("/vectors/" + id, { method: "DELETE" });
-  showToast(r.ok ? "Deleted #" + id : "Failed", r.ok ? "success" : "error");
+  if (!confirm(`Delete vector ${id}?`)) return;
+  const r = await apiCall(`/vectors/${id}`, { method: "DELETE" });
+  showToast(r.ok ? `Deleted #${id}` : "Failed", r.ok ? "success" : "error");
   if (r.ok) {
     selectedPointIdx = -1;
     loadPoints();
   }
 }
+
 async function addVector() {
   const dataStr = document.getElementById("vec-add-data").value.trim();
   const metaStr = document.getElementById("vec-add-meta").value.trim();
@@ -277,22 +266,23 @@ async function addVector() {
       body: JSON.stringify(body),
     });
     showToast(
-      r.ok ? "Vector added" : "Failed: " + JSON.stringify(r.data),
+      r.ok ? "Vector added" : `Failed: ${JSON.stringify(r.data)}`,
       r.ok ? "success" : "error",
     );
   } catch (e) {
-    showToast("Invalid JSON: " + e.message, "error");
+    showToast(`Invalid JSON: ${e.message}`, "error");
   }
 }
 
-/* Scatter Plot */
+// scatter plot vis
+
 let vizData = null;
 async function runVisualization() {
   const limit = parseInt(document.getElementById("viz-limit").value) || 200;
   const algo = document.getElementById("viz-algo").value;
   const status = document.getElementById("viz-status");
   status.textContent = "Loading…";
-  const r = await apiCall("/vectors/scroll?offset=0&limit=" + limit);
+  const r = await apiCall(`/vectors/scroll?offset=0&limit=${limit}`);
   if (!r.ok || !r.data.vectors || !r.data.vectors.length) {
     status.textContent = "No data";
     return;
@@ -303,13 +293,9 @@ async function runVisualization() {
   const dim = raw[0].length;
   const pts = algo === "pca" ? pcaProject(raw) : randomProject(raw);
   vizData = { pts, indices, raw };
-  status.textContent = vecs.length + " pts · " + algo.toUpperCase();
+  status.textContent = `${vecs.length} pts · ${algo.toUpperCase()}`;
   document.getElementById("scatter-info").innerHTML =
-    "<b>" +
-    vecs.length +
-    "</b> vectors projected from <b>" +
-    dim +
-    "D</b> → 2D. Hover to inspect.";
+    `<b>${vecs.length}</b> vectors projected from <b>${dim}D</b> → 2D. Hover to inspect.`;
   drawScatter();
 }
 
@@ -393,8 +379,8 @@ function drawScatter() {
   const dpr = window.devicePixelRatio || 1;
   canvas.width = w * dpr;
   canvas.height = h * dpr;
-  canvas.style.width = w + "px";
-  canvas.style.height = h + "px";
+  canvas.style.width = `${w}px`;
+  canvas.style.height = `${h}px`;
   const ctx = canvas.getContext("2d");
   ctx.scale(dpr, dpr);
   if (!vizData) return;
@@ -499,8 +485,8 @@ function showVizTooltip(e, html) {
   if (tx + r.width > window.innerWidth - 8) tx = e.clientX - r.width - 10;
   if (ty + r.height > window.innerHeight - 8) ty = e.clientY - r.height - 10;
   if (ty < 8) ty = 8;
-  vizTooltip.style.left = tx + "px";
-  vizTooltip.style.top = ty + "px";
+  vizTooltip.style.left = `${tx}px`;
+  vizTooltip.style.top = `${ty}px`;
 }
 function hideVizTooltip() {
   vizTooltip.classList.remove("visible");
@@ -515,25 +501,17 @@ function showScatterDetail(idx) {
   }
   const pt = vizData.raw[idx],
     id = vizData.indices[idx];
-  const vecStr = "[" + pt.map((v) => v.toFixed(6)).join(", ") + "]";
-  body.innerHTML =
-    '<div class="detail-label">Point ID</div><div class="detail-value" style="font-size:16px;font-weight:600;color:var(--accent)">#' +
-    id +
-    "</div>" +
-    '<div class="detail-label">Dimension</div><div class="detail-value dim">' +
-    pt.length +
-    "</div>" +
-    '<div class="detail-label">Projected (x, y)</div><div class="detail-value dim">' +
-    vizData.pts[idx][0].toFixed(4) +
-    ", " +
-    vizData.pts[idx][1].toFixed(4) +
-    "</div>" +
-    '<div class="detail-label">Vector Data</div><div class="detail-value" style="font-size:11px;line-height:1.6;max-height:220px;overflow-y:auto;background:var(--bg-input);padding:10px;border-radius:6px">' +
-    vecStr +
-    "</div>" +
-    '<button class="btn btn-sm btn-outline" style="margin-top:4px" onclick="copyText(\'' +
-    escapeJsString(vecStr) +
-    "')\">Copy Vector</button>";
+  const vecStr = `[${pt.map((v) => v.toFixed(6)).join(", ")}]`;
+  body.innerHTML = `
+    <div class="detail-label">Point ID</div>
+    <div class="detail-value" style="font-size:16px;font-weight:600;color:var(--accent)">#${id}</div>
+    <div class="detail-label">Dimension</div>
+    <div class="detail-value dim">${pt.length}</div>
+    <div class="detail-label">Projected (x, y)</div>
+    <div class="detail-value dim">${vizData.pts[idx][0].toFixed(4)}, ${vizData.pts[idx][1].toFixed(4)}</div>
+    <div class="detail-label">Vector Data</div>
+    <div class="detail-value" style="font-size:11px;line-height:1.6;max-height:220px;overflow-y:auto;background:var(--bg-input);padding:10px;border-radius:6px">${vecStr}</div>
+    <button class="btn btn-sm btn-outline" style="margin-top:4px" onclick="copyText('${escapeJsString(vecStr)}')">Copy Vector</button>`;
 }
 
 function drawScatterWithHighlights() {
@@ -575,7 +553,7 @@ function drawScatterWithHighlights() {
     ctx.fillStyle = "#555";
     ctx.font = '10px "IBM Plex Mono"';
     ctx.textAlign = "left";
-    ctx.fillText("#" + indices[scatterHovered], sx + 12, sy + 4);
+    ctx.fillText(`#${indices[scatterHovered]}`, sx + 12, sy + 4);
   }
   ctx.setTransform(1, 0, 0, 1, 0, 0);
 }
@@ -593,28 +571,18 @@ document
     if (scatterHovered >= 0) {
       const pt = vizData.raw[scatterHovered],
         id = vizData.indices[scatterHovered];
-      const preview =
-        "[" +
-        pt
-          .slice(0, 4)
-          .map((v) => v.toFixed(3))
-          .join(", ") +
-        (pt.length > 4 ? ", \u2026" : "") +
-        "]";
+      const preview = `[${pt
+        .slice(0, 4)
+        .map((v) => v.toFixed(3))
+        .join(", ")}${pt.length > 4 ? ", \u2026" : ""}]`;
       showVizTooltip(
         e,
-        '<div class="tt-id">Point #' +
-          id +
-          "</div>" +
-          '<div class="tt-dim">' +
-          pt.length +
-          "-dimensional</div>" +
-          '<div class="tt-data">' +
-          preview +
-          "</div>",
+        `<div class="tt-id">Point #${id}</div>
+         <div class="tt-dim">${pt.length}-dimensional</div>
+         <div class="tt-data">${preview}</div>`,
       );
       document.getElementById("scatter-info").innerHTML =
-        "Point <b>#" + id + "</b> \u2014 " + pt.length + "D \u2014 " + preview;
+        `Point <b>#${id}</b> \u2014 ${pt.length}D \u2014 ${preview}`;
     } else {
       hideVizTooltip();
     }
@@ -639,7 +607,8 @@ document
     showScatterDetail(scatterSelected);
   });
 
-/* Similarity graph */
+// similarlty graph
+
 let graphNodes = [],
   graphEdges = [],
   graphAnim = null;
@@ -658,7 +627,7 @@ async function runGraph() {
     for (const nid of frontier) {
       if (visited.has(nid)) continue;
       visited.add(nid);
-      const vr = await apiCall("/vectors/" + nid);
+      const vr = await apiCall(`/vectors/${nid}`);
       if (!vr.ok || !vr.data.data) continue;
       if (!graphNodes.find((n) => n.id === nid))
         graphNodes.push({
@@ -717,16 +686,9 @@ async function runGraph() {
     }
     frontier = next;
   }
-  status.textContent =
-    graphNodes.length + " nodes · " + graphEdges.length + " edges";
+  status.textContent = `${graphNodes.length} nodes · ${graphEdges.length} edges`;
   document.getElementById("graph-info").innerHTML =
-    "<b>" +
-    graphNodes.length +
-    "</b> nodes, <b>" +
-    graphEdges.length +
-    "</b> edges from seed <b>#" +
-    seed +
-    "</b>";
+    `<b>${graphNodes.length}</b> nodes, <b>${graphEdges.length}</b> edges from seed <b>#${seed}</b>`;
   if (graphAnim) cancelAnimationFrame(graphAnim);
   simGraph();
 }
@@ -772,43 +734,42 @@ function showGraphDetail(idx) {
   }
   const node = graphNodes[idx];
   const neighbors = getNodeNeighbors(idx);
-  const vecStr = "[" + node.data.map((v) => v.toFixed(6)).join(", ") + "]";
-  let html =
-    '<div class="detail-label">Node ID</div><div class="detail-value" style="font-size:16px;font-weight:600;color:var(--accent)">#' +
-    node.id +
-    "</div>" +
-    '<div class="detail-label">Depth</div><div class="detail-value dim">' +
-    node.depth +
-    "</div>" +
-    '<div class="detail-label">Dimension</div><div class="detail-value dim">' +
-    node.data.length +
-    "</div>" +
-    '<div class="detail-label">Neighbors (' +
-    neighbors.length +
-    ")</div>";
+  const vecStr = `[${node.data.map((v) => v.toFixed(6)).join(", ")}]`;
+  let html = `
+    <div class="detail-label">Node ID</div>
+    <div class="detail-value" style="font-size:16px;font-weight:600;color:var(--accent)">#${node.id}</div>
+    <div class="detail-label">Depth</div>
+    <div class="detail-value dim">${node.depth}</div>
+    <div class="detail-label">Dimension</div>
+    <div class="detail-value dim">${node.data.length}</div>
+    <div class="detail-label">Neighbors (${neighbors.length})</div>`;
   if (neighbors.length) {
     html += '<div style="margin-bottom:14px">';
     for (const nb of neighbors) {
-      html +=
-        '<div style="display:flex;justify-content:space-between;padding:3px 0;font-family:var(--mono);font-size:11px;border-bottom:1px solid var(--border-light)">' +
-        '<span style="color:var(--text)">#' +
-        nb.id +
-        '</span><span style="color:var(--text-muted)">' +
-        (nb.dist != null ? nb.dist.toFixed(4) : "") +
-        "</span></div>";
+      html += `<div style="display:flex;justify-content:space-between;padding:3px 0;font-family:var(--mono);font-size:11px;border-bottom:1px solid var(--border-light)">
+        <span style="color:var(--text)">#${nb.id}</span>
+        <span style="color:var(--text-muted)">${nb.dist != null ? nb.dist.toFixed(4) : ""}</span>
+      </div>`;
     }
     html += "</div>";
   }
-  html +=
-    '<div class="detail-label">Vector Data</div>' +
-    '<div class="detail-value" style="font-size:11px;line-height:1.6;max-height:180px;overflow-y:auto;background:var(--bg-input);padding:10px;border-radius:6px">' +
-    vecStr +
-    "</div>" +
-    '<button class="btn btn-sm btn-outline" style="margin-top:4px" onclick="copyText(\'' +
-    escapeJsString(vecStr) +
-    "')\">Copy Vector</button>";
+  html += `
+    <div class="detail-label">Vector Data</div>
+    <div class="detail-value" style="font-size:11px;line-height:1.6;max-height:180px;overflow-y:auto;background:var(--bg-input);padding:10px;border-radius:6px">${vecStr}</div>
+    <button class="btn btn-sm btn-outline" style="margin-top:4px" onclick="copyText('${escapeJsString(vecStr)}')">Copy Vector</button>`;
   body.innerHTML = html;
 }
+
+// Force simulation tuning constants
+const SIM_REPULSION = 4000; // node-node charge repulsion strength
+const SIM_GE_REPULSION = 3000; // graph explorer repulsion (fewer, denser nodes)
+const SIM_SPRING_LEN = 80; // spring rest length in px
+const SIM_SPRING_K = 0.04; // spring stiffness
+const SIM_GRAVITY = 0.001; // pull toward canvas center
+const SIM_DAMPING = 0.85; // velocity damping per tick
+const SIM_MAX_ITERS = 250; // similarity graph tick budget
+const SIM_GE_MAX_ITERS = 200; // graph explorer tick budget
+const SIM_NODE_MARGIN = 24; // keep nodes this far from canvas edges (px)
 
 function simGraph() {
   const canvas = document.getElementById("graph-canvas");
@@ -817,8 +778,8 @@ function simGraph() {
     dpr = window.devicePixelRatio || 1;
   canvas.width = w * dpr;
   canvas.height = h * dpr;
-  canvas.style.width = w + "px";
-  canvas.style.height = h + "px";
+  canvas.style.width = `${w}px`;
+  canvas.style.height = `${h}px`;
   let iter = 0;
   function drawGraphFrame() {
     const ctx = canvas.getContext("2d");
@@ -901,7 +862,7 @@ function simGraph() {
       ctx.fillStyle = "#a0a0a0";
       ctx.font = '10px "IBM Plex Mono"';
       ctx.textAlign = "center";
-      ctx.fillText("#" + n.id, n.x, n.y - 12);
+      ctx.fillText(`#${n.id}`, n.x, n.y - 12);
     }
     ctx.globalAlpha = 1;
     ctx.setTransform(1, 0, 0, 1, 0, 0);
@@ -914,7 +875,7 @@ function simGraph() {
         const dx = graphNodes[j].x - graphNodes[i].x,
           dy = graphNodes[j].y - graphNodes[i].y;
         const dist = Math.hypot(dx, dy) || 1,
-          f = (4000 / (dist * dist)) * alpha;
+          f = (SIM_REPULSION / (dist * dist)) * alpha;
         graphNodes[i].vx -= (dx / dist) * f;
         graphNodes[i].vy -= (dy / dist) * f;
         graphNodes[j].vx += (dx / dist) * f;
@@ -927,25 +888,25 @@ function simGraph() {
       const dx = b.x - a.x,
         dy = b.y - a.y,
         dist = Math.hypot(dx, dy) || 1,
-        f = (dist - 80) * 0.04 * alpha;
+        f = (dist - SIM_SPRING_LEN) * SIM_SPRING_K * alpha;
       a.vx += (dx / dist) * f;
       a.vy += (dy / dist) * f;
       b.vx -= (dx / dist) * f;
       b.vy -= (dy / dist) * f;
     }
     for (const n of graphNodes) {
-      n.vx += (w / 2 - n.x) * 0.001 * alpha;
-      n.vy += (h / 2 - n.y) * 0.001 * alpha;
-      n.vx *= 0.85;
-      n.vy *= 0.85;
+      n.vx += (w / 2 - n.x) * SIM_GRAVITY * alpha;
+      n.vy += (h / 2 - n.y) * SIM_GRAVITY * alpha;
+      n.vx *= SIM_DAMPING;
+      n.vy *= SIM_DAMPING;
       n.x += n.vx;
       n.y += n.vy;
-      n.x = Math.max(24, Math.min(w - 24, n.x));
-      n.y = Math.max(24, Math.min(h - 24, n.y));
+      n.x = Math.max(SIM_NODE_MARGIN, Math.min(w - SIM_NODE_MARGIN, n.x));
+      n.y = Math.max(SIM_NODE_MARGIN, Math.min(h - SIM_NODE_MARGIN, n.y));
     }
     drawGraphFrame();
     iter++;
-    if (iter < 250) graphAnim = requestAnimationFrame(tick);
+    if (iter < SIM_MAX_ITERS) graphAnim = requestAnimationFrame(tick);
   }
   tick();
 
@@ -959,34 +920,18 @@ function simGraph() {
     if (graphHovered >= 0) {
       const node = graphNodes[graphHovered];
       const neighbors = getNodeNeighbors(graphHovered);
+      const nodePreview = `[${node.data
+        .slice(0, 3)
+        .map((v) => v.toFixed(3))
+        .join(", ")}${node.data.length > 3 ? ", \u2026" : ""}]`;
       showVizTooltip(
         e,
-        '<div class="tt-id">Node #' +
-          node.id +
-          "</div>" +
-          '<div class="tt-dim">' +
-          node.data.length +
-          "D \u00b7 depth " +
-          node.depth +
-          " \u00b7 " +
-          neighbors.length +
-          " neighbors</div>" +
-          '<div class="tt-data">[' +
-          node.data
-            .slice(0, 3)
-            .map((v) => v.toFixed(3))
-            .join(", ") +
-          (node.data.length > 3 ? ", \u2026" : "") +
-          "]</div>",
+        `<div class="tt-id">Node #${node.id}</div>
+         <div class="tt-dim">${node.data.length}D \u00b7 depth ${node.depth} \u00b7 ${neighbors.length} neighbors</div>
+         <div class="tt-data">${nodePreview}</div>`,
       );
       document.getElementById("graph-info").innerHTML =
-        "Node <b>#" +
-        node.id +
-        "</b> \u2014 depth " +
-        node.depth +
-        " \u2014 " +
-        neighbors.length +
-        " neighbors";
+        `Node <b>#${node.id}</b> \u2014 depth ${node.depth} \u2014 ${neighbors.length} neighbors`;
     } else {
       hideVizTooltip();
     }
@@ -1007,34 +952,28 @@ function simGraph() {
   });
 }
 
-/* Search */
+// search
+
 function renderSearchResults(r, tbodyId, metaId, tableId, emptyId) {
   const tbody = document.getElementById(tbodyId),
     meta = document.getElementById(metaId);
   const tbl = document.getElementById(tableId),
     empty = document.getElementById(emptyId);
   if (r.ok && r.data && r.data.results) {
-    meta.textContent =
-      r.data.results.length +
-      " results" +
-      (r.data.latency_ms ? " in " + r.data.latency_ms + "ms" : "");
+    meta.textContent = `${r.data.results.length} results${
+      r.data.latency_ms ? ` in ${r.data.latency_ms}ms` : ""
+    }`;
     tbody.innerHTML = "";
     r.data.results.forEach((h, i) => {
       const dp = h.data
-        ? JSON.stringify(h.data).slice(0, 50) +
-          (JSON.stringify(h.data).length > 50 ? "…" : "")
+        ? `${JSON.stringify(h.data).slice(0, 50)}${
+            JSON.stringify(h.data).length > 50 ? "…" : ""
+          }`
         : "—";
       const tr = document.createElement("tr");
-      tr.innerHTML =
-        "<td>" +
-        (i + 1) +
-        "</td><td>" +
-        (h.index ?? "—") +
-        '</td><td class="mono">' +
-        (h.distance != null ? h.distance.toFixed(6) : "—") +
-        '</td><td class="mono">' +
-        dp +
-        "</td>";
+      tr.innerHTML = `<td>${i + 1}</td><td>${h.index ?? "—"}</td><td class="mono">${
+        h.distance != null ? h.distance.toFixed(6) : "—"
+      }</td><td class="mono">${dp}</td>`;
       tbody.appendChild(tr);
     });
     tbl.style.display = "table";
@@ -1043,10 +982,11 @@ function renderSearchResults(r, tbodyId, metaId, tableId, emptyId) {
     meta.textContent = "";
     tbody.innerHTML = "";
     tbl.style.display = "none";
-    empty.textContent = "Error: " + JSON.stringify(r.data);
+    empty.textContent = `Error: ${JSON.stringify(r.data)}`;
     empty.style.display = "block";
   }
 }
+
 async function doSearch() {
   try {
     const q = JSON.parse(document.getElementById("search-query").value.trim());
@@ -1075,7 +1015,7 @@ async function doSearch() {
   } catch (e) {
     document.getElementById("search-meta").textContent = "";
     document.getElementById("search-empty").textContent =
-      "Invalid JSON: " + e.message;
+      `Invalid JSON: ${e.message}`;
     document.getElementById("search-empty").style.display = "block";
     document.getElementById("search-results").style.display = "none";
   }
@@ -1103,13 +1043,14 @@ async function doRangeSearch() {
   } catch (e) {
     document.getElementById("range-meta").textContent = "";
     document.getElementById("range-empty").textContent =
-      "Invalid JSON: " + e.message;
+      `Invalid JSON: ${e.message}`;
     document.getElementById("range-empty").style.display = "block";
     document.getElementById("range-results").style.display = "none";
   }
 }
 
-/* Console */
+// console UI section
+
 async function consoleSend() {
   const method = document.getElementById("con-method").value,
     url = document.getElementById("con-url").value;
@@ -1122,7 +1063,7 @@ async function consoleSend() {
       document.getElementById("con-meta").innerHTML =
         '<span class="status-err">INVALID JSON</span>';
       document.getElementById("con-result").innerHTML =
-        '<span class="json-null">' + escapeHtml(String(e.message)) + "</span>";
+        `<span class="json-null">${escapeHtml(String(e.message))}</span>`;
       return;
     }
     opts.headers = { "Content-Type": "application/json" };
@@ -1131,31 +1072,26 @@ async function consoleSend() {
   const t0 = performance.now();
   const r = await apiCall(url, opts);
   const ms = (performance.now() - t0).toFixed(1);
+  const statusCls =
+    r.status >= 200 && r.status < 400 ? "status-ok" : "status-err";
   document.getElementById("con-meta").innerHTML =
-    '<span class="' +
-    (r.status >= 200 && r.status < 400 ? "status-ok" : "status-err") +
-    '">' +
-    r.status +
-    "</span><span>" +
-    ms +
-    "ms</span>";
+    `<span class="${statusCls}">${r.status}</span><span>${ms}ms</span>`;
   document.getElementById("con-result").innerHTML = jsonHighlight(r.data);
 }
+
 async function quickReq(method, url) {
   const el = document.getElementById("ov-action-result");
   if (el) el.innerHTML = '<span class="json-null">Loading...</span>';
   const r = await apiCall(url, { method });
   if (el) el.innerHTML = jsonHighlight(r.data);
-  showToast(
-    r.ok ? method + " " + url + " OK" : "Error",
-    r.ok ? "success" : "error",
-  );
+  showToast(r.ok ? `${method} ${url} OK` : "Error", r.ok ? "success" : "error");
 }
+
 async function quickBackup() {
   const el = document.getElementById("ov-action-result");
   if (el) el.innerHTML = '<span class="json-null">Backing up...</span>';
   const ts = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
-  const path = "/tmp/gigavector_backup_" + ts + ".gvb";
+  const path = `/tmp/gigavector_backup_${ts}.gvb`;
   const r = await apiCall("/api/backups", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -1164,7 +1100,7 @@ async function quickBackup() {
   if (el) el.innerHTML = jsonHighlight(r.data);
   const ok = r.ok && (!r.data || r.data.success !== false);
   showToast(
-    ok ? "Backup saved to " + path : "Backup failed",
+    ok ? `Backup saved to ${path}` : "Backup failed",
     ok ? "success" : "error",
   );
 }
@@ -1172,14 +1108,16 @@ document.getElementById("con-url").addEventListener("keydown", (e) => {
   if (e.key === "Enter") consoleSend();
 });
 
+// char primitives
+
 function drawLineChart(canvas, data, opts = {}) {
   const w = canvas.parentElement.clientWidth - 32,
     h = opts.height || 160,
     dpr = window.devicePixelRatio || 1;
   canvas.width = w * dpr;
   canvas.height = h * dpr;
-  canvas.style.width = w + "px";
-  canvas.style.height = h + "px";
+  canvas.style.width = `${w}px`;
+  canvas.style.height = `${h}px`;
   const ctx = canvas.getContext("2d");
   ctx.scale(dpr, dpr);
   const pad = { t: 10, r: 10, b: 24, l: 50 },
@@ -1247,8 +1185,8 @@ function drawBarChart(canvas, labels, values, opts = {}) {
     dpr = window.devicePixelRatio || 1;
   canvas.width = w * dpr;
   canvas.height = h * dpr;
-  canvas.style.width = w + "px";
-  canvas.style.height = h + "px";
+  canvas.style.width = `${w}px`;
+  canvas.style.height = `${h}px`;
   const ctx = canvas.getContext("2d");
   ctx.scale(dpr, dpr);
   const pad = { t: 14, r: 10, b: 36, l: 50 },
@@ -1302,8 +1240,8 @@ function drawGauge(canvas, value, max, opts = {}) {
     dpr = window.devicePixelRatio || 1;
   canvas.width = w * dpr;
   canvas.height = h * dpr;
-  canvas.style.width = w + "px";
-  canvas.style.height = h + "px";
+  canvas.style.width = `${w}px`;
+  canvas.style.height = `${h}px`;
   const ctx = canvas.getContext("2d");
   ctx.scale(dpr, dpr);
   ctx.fillStyle = "#09090b";
@@ -1327,13 +1265,15 @@ function drawGauge(canvas, value, max, opts = {}) {
   ctx.fillStyle = "#e5e5e5";
   ctx.font = 'bold 20px "IBM Plex Mono"';
   ctx.textAlign = "center";
-  ctx.fillText((pct * 100).toFixed(0) + "%", cx, cy + 6);
+  ctx.fillText(`${(pct * 100).toFixed(0)}%`, cx, cy + 6);
   if (opts.label) {
     ctx.fillStyle = "#999";
     ctx.font = '10px "IBM Plex Mono"';
     ctx.fillText(opts.label, cx, cy + 22);
   }
 }
+
+// monitoring
 
 const monRing = { qps: [], latency: [], mem: [] };
 let monTimer = null;
@@ -1368,10 +1308,12 @@ async function refreshMonitoring() {
     label: "Search latency (ms)",
   });
   drawGauge(document.getElementById("mon-mem-chart"), mem, 1073741824, {
-    label: formatBytes(mem) + " / 1 GB",
+    label: `${formatBytes(mem)} / 1 GB`,
   });
   document.getElementById("mon-detail-json").innerHTML = jsonHighlight(d);
 }
+
+// SQL console
 
 async function runSQL() {
   const query = document.getElementById("sql-input").value.trim();
@@ -1385,15 +1327,14 @@ async function runSQL() {
   });
   const ms = (performance.now() - t0).toFixed(1);
   document.getElementById("sql-meta").textContent = r.ok
-    ? r.data.row_count + " rows in " + ms + "ms"
-    : "Error: " + (r.data.message || JSON.stringify(r.data));
+    ? `${r.data.row_count} rows in ${ms}ms`
+    : `Error: ${r.data.message || JSON.stringify(r.data)}`;
   if (r.ok && r.data.columns) {
     const thead = document.getElementById("sql-thead");
     const cols = r.data.columns || [];
-    thead.innerHTML =
-      "<tr>" +
-      cols.map((c) => "<th>" + escapeHtml(c) + "</th>").join("") +
-      "</tr>";
+    thead.innerHTML = `<tr>${cols
+      .map((c) => `<th>${escapeHtml(c)}</th>`)
+      .join("")}</tr>`;
     const tbody = document.getElementById("sql-tbody");
     tbody.innerHTML = "";
     (r.data.rows || []).forEach((row) => {
@@ -1401,12 +1342,10 @@ async function runSQL() {
       tr.innerHTML = cols
         .map((c) => {
           const v = row ? row[c] : null;
-          if (typeof v === "number") return '<td class="mono">' + v + "</td>";
-          return (
-            '<td class="mono">' +
-            escapeHtml(v == null ? "—" : String(v)) +
-            "</td>"
-          );
+          if (typeof v === "number") return `<td class="mono">${v}</td>`;
+          return `<td class="mono">${escapeHtml(
+            v == null ? "—" : String(v),
+          )}</td>`;
         })
         .join("");
       tbody.appendChild(tr);
@@ -1430,7 +1369,7 @@ async function explainSQL() {
   el.style.display = "block";
   el.innerHTML = r.ok
     ? jsonHighlight(r.data)
-    : '<span class="json-null">Error: ' + (r.data.message || "") + "</span>";
+    : `<span class="json-null">Error: ${r.data.message || ""}</span>`;
   document.getElementById("sql-meta").textContent = r.ok
     ? "Query plan"
     : "Error";
@@ -1439,6 +1378,8 @@ async function explainSQL() {
 document.getElementById("sql-input").addEventListener("keydown", (e) => {
   if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) runSQL();
 });
+
+//  backup & restore section
 
 async function createBackup() {
   const path = document.getElementById("bk-path").value.trim();
@@ -1485,7 +1426,7 @@ async function readBackupHeader() {
     return;
   }
   const r = await apiCall(
-    "/api/backups/header?path=" + encodeURIComponent(path),
+    `/api/backups/header?path=${encodeURIComponent(path)}`,
   );
   const el = document.getElementById("bk-header-result");
   el.style.display = "block";
@@ -1494,6 +1435,7 @@ async function readBackupHeader() {
 
 let importData = null,
   importCols = [];
+
 const dropZone = document.getElementById("import-drop");
 const fileInput = document.getElementById("import-file");
 
@@ -1542,11 +1484,10 @@ function handleImportFile(file) {
           return obj;
         });
       }
-      dropZone.innerHTML =
-        "<b>" + file.name + "</b> — " + importData.length + " records";
+      dropZone.innerHTML = `<b>${file.name}</b> — ${importData.length} records`;
       showImportPreview();
     } catch (err) {
-      showToast("Parse error: " + err.message, "error");
+      showToast(`Parse error: ${err.message}`, "error");
     }
   };
   reader.readAsText(file);
@@ -1560,17 +1501,16 @@ function showImportPreview() {
   mappings.innerHTML =
     '<div class="section-desc">Map file columns to vector fields:</div>';
   const dataOpts = keys
-    .map((k) => '<option value="' + k + '">' + k + "</option>")
+    .map((k) => `<option value="${k}">${k}</option>`)
     .join("");
-  mappings.innerHTML +=
-    '<div class="mapping-row"><span style="min-width:100px;font-weight:600">Vector Data</span>' +
-    '<select id="import-map-data"><option value="__auto__">Auto-detect</option>' +
-    dataOpts +
-    "</select></div>" +
-    '<div class="mapping-row"><span style="min-width:100px;font-weight:600">Metadata</span>' +
-    '<select id="import-map-meta"><option value="__none__">None</option><option value="__all__">All remaining</option>' +
-    dataOpts +
-    "</select></div>";
+  mappings.innerHTML += `<div class="mapping-row"><span style="min-width:100px;font-weight:600">Vector Data</span>
+    <select id="import-map-data"><option value="__auto__">Auto-detect</option>
+    ${dataOpts}
+    </select></div>
+    <div class="mapping-row"><span style="min-width:100px;font-weight:600">Metadata</span>
+    <select id="import-map-meta"><option value="__none__">None</option><option value="__all__">All remaining</option>
+    ${dataOpts}
+    </select></div>`;
 }
 
 async function runImport() {
@@ -1623,16 +1563,14 @@ async function runImport() {
       inserted += r.data.inserted;
       errors += r.data.errors;
     }
-    fill.style.width =
-      Math.min(100, ((i + batchSize) / importData.length) * 100).toFixed(0) +
-      "%";
-    status.textContent = inserted + " inserted, " + errors + " errors";
+    fill.style.width = `${Math.min(100, ((i + batchSize) / importData.length) * 100).toFixed(0)}%`;
+    status.textContent = `${inserted} inserted, ${errors} errors`;
   }
   fill.style.width = "100%";
   const el = document.getElementById("import-result");
   el.style.display = "block";
   el.innerHTML = jsonHighlight({ inserted, errors, total: importData.length });
-  showToast("Import complete: " + inserted + " vectors", "success");
+  showToast(`Import complete: ${inserted} vectors`, "success");
 }
 
 function resetImport() {
@@ -1647,6 +1585,7 @@ function resetImport() {
 }
 
 async function loadNamespaces() {
+  // namespaces
   const r = await apiCall("/api/namespaces");
   const tbody = document.getElementById("ns-tbody");
   const empty = document.getElementById("ns-empty");
@@ -1662,16 +1601,13 @@ async function loadNamespaces() {
       .map((ns) => {
         const escNs = escapeHtml(ns);
         const jsNs = escapeJsString(ns);
-        return (
-          "<tr><td>" +
-          escNs +
-          '</td><td><button class="btn btn-sm btn-outline" onclick="nsInfo(\'' +
-          jsNs +
-          "')\">Info</button> " +
-          '<button class="btn btn-sm btn-danger" onclick="deleteNamespace(\'' +
-          jsNs +
-          "')\">Delete</button></td></tr>"
-        );
+        return `<tr>
+          <td>${escNs}</td>
+          <td>
+            <button class="btn btn-sm btn-outline" onclick="nsInfo('${jsNs}')">Info</button>
+            <button class="btn btn-sm btn-danger" onclick="deleteNamespace('${jsNs}')">Delete</button>
+          </td>
+        </tr>`;
       })
       .join("");
   }
@@ -1693,15 +1629,15 @@ async function createNamespace() {
     }),
   });
   showToast(
-    r.ok ? "Namespace created" : "Error: " + (r.data.message || ""),
+    r.ok ? "Namespace created" : `Error: ${r.data.message || ""}`,
     r.ok ? "success" : "error",
   );
   if (r.ok) loadNamespaces();
 }
 
 async function deleteNamespace(name) {
-  if (!confirm('Delete namespace "' + name + '"?')) return;
-  const r = await apiCall("/api/namespaces/" + encodeURIComponent(name), {
+  if (!confirm(`Delete namespace "${name}"?`)) return;
+  const r = await apiCall(`/api/namespaces/${encodeURIComponent(name)}`, {
     method: "DELETE",
   });
   showToast(r.ok ? "Deleted" : "Error", r.ok ? "success" : "error");
@@ -1709,13 +1645,13 @@ async function deleteNamespace(name) {
 }
 
 async function nsInfo(name) {
-  const r = await apiCall(
-    "/api/namespaces/" + encodeURIComponent(name) + "/info",
-  );
+  const r = await apiCall(`/api/namespaces/${encodeURIComponent(name)}/info`);
   const el = document.getElementById("ns-info");
   el.style.display = "block";
   el.innerHTML = jsonHighlight(r.data);
 }
+
+//  graph UI
 
 let geNodes = [],
   geEdges = [],
@@ -1729,9 +1665,9 @@ async function geAddNode() {
     body: JSON.stringify({ label }),
   });
   document.getElementById("ge-status").textContent = r.ok
-    ? "Node #" + r.data.id + " added"
-    : "Error: " + (r.data.message || "");
-  if (r.ok) showToast("Node #" + r.data.id + " created", "success");
+    ? `Node #${r.data.id} added`
+    : `Error: ${r.data.message || ""}`;
+  if (r.ok) showToast(`Node #${r.data.id} created`, "success");
 }
 
 async function geAddEdge() {
@@ -1744,19 +1680,17 @@ async function geAddEdge() {
     body: JSON.stringify({ source: src, target: tgt, label }),
   });
   document.getElementById("ge-status").textContent = r.ok
-    ? "Edge #" + r.data.id + " added"
-    : "Error: " + (r.data.message || "");
+    ? `Edge #${r.data.id} added`
+    : `Error: ${r.data.message || ""}`;
 }
 
 async function geBFS() {
   const start = parseInt(document.getElementById("ge-bfs-start").value) || 0;
   const depth = parseInt(document.getElementById("ge-bfs-depth").value) || 3;
-  const r = await apiCall(
-    "/api/graph/bfs?start=" + start + "&max_depth=" + depth,
-  );
+  const r = await apiCall(`/api/graph/bfs?start=${start}&max_depth=${depth}`);
   if (!r.ok) {
     document.getElementById("ge-status").textContent =
-      "Error: " + (r.data.message || "");
+      `Error: ${r.data.message || ""}`;
     return;
   }
   geNodes = r.data.nodes.map((n, i) => ({
@@ -1768,7 +1702,7 @@ async function geBFS() {
   }));
   geEdges = r.data.edges || [];
   document.getElementById("ge-status").textContent =
-    geNodes.length + " nodes, " + geEdges.length + " edges";
+    `${geNodes.length} nodes, ${geEdges.length} edges`;
   if (geAnim) cancelAnimationFrame(geAnim);
   simGraphExplorer();
 }
@@ -1776,17 +1710,11 @@ async function geBFS() {
 async function geShortestPath() {
   const from = parseInt(document.getElementById("ge-sp-from").value);
   const to = parseInt(document.getElementById("ge-sp-to").value);
-  const r = await apiCall(
-    "/api/graph/shortest-path?from=" + from + "&to=" + to,
-  );
+  const r = await apiCall(`/api/graph/shortest-path?from=${from}&to=${to}`);
   if (r.ok && r.data.path !== null) {
     document.getElementById("ge-status").textContent =
-      "Path: " +
-      r.data.node_ids.join(" → ") +
-      " (weight: " +
-      r.data.total_weight.toFixed(2) +
-      ")";
-    showToast("Path found: " + r.data.node_ids.length + " nodes", "success");
+      `Path: ${r.data.node_ids.join(" → ")} (weight: ${r.data.total_weight.toFixed(2)})`;
+    showToast(`Path found: ${r.data.node_ids.length} nodes`, "success");
   } else {
     document.getElementById("ge-status").textContent =
       r.data.message || "No path found";
@@ -1808,7 +1736,7 @@ async function geRefresh() {
   }));
   geEdges = r.data.edges || [];
   document.getElementById("ge-status").textContent =
-    geNodes.length + " nodes, " + geEdges.length + " edges";
+    `${geNodes.length} nodes, ${geEdges.length} edges`;
   if (geAnim) cancelAnimationFrame(geAnim);
   simGraphExplorer();
 }
@@ -1820,8 +1748,8 @@ function simGraphExplorer() {
     dpr = window.devicePixelRatio || 1;
   canvas.width = w * dpr;
   canvas.height = h * dpr;
-  canvas.style.width = w + "px";
-  canvas.style.height = h + "px";
+  canvas.style.width = `${w}px`;
+  canvas.style.height = `${h}px`;
   let iter = 0;
   const idMap = new Map();
   geNodes.forEach((n, i) => idMap.set(n.id, i));
@@ -1855,7 +1783,7 @@ function simGraphExplorer() {
       ctx.fillStyle = "#a0a0a0";
       ctx.font = '10px "IBM Plex Mono"';
       ctx.textAlign = "center";
-      ctx.fillText(n.label || "#" + n.id, n.x, n.y - 10);
+      ctx.fillText(n.label || `#${n.id}`, n.x, n.y - 10);
     }
     ctx.setTransform(1, 0, 0, 1, 0, 0);
   }
@@ -1867,7 +1795,7 @@ function simGraphExplorer() {
         const dx = geNodes[j].x - geNodes[i].x,
           dy = geNodes[j].y - geNodes[i].y;
         const dist = Math.hypot(dx, dy) || 1,
-          f = (3000 / (dist * dist)) * alpha;
+          f = (SIM_GE_REPULSION / (dist * dist)) * alpha;
         geNodes[i].vx -= (dx / dist) * f;
         geNodes[i].vy -= (dy / dist) * f;
         geNodes[j].vx += (dx / dist) * f;
@@ -1882,32 +1810,33 @@ function simGraphExplorer() {
       const dx = b.x - a.x,
         dy = b.y - a.y,
         dist = Math.hypot(dx, dy) || 1,
-        f = (dist - 80) * 0.04 * alpha;
+        f = (dist - SIM_SPRING_LEN) * SIM_SPRING_K * alpha;
       a.vx += (dx / dist) * f;
       a.vy += (dy / dist) * f;
       b.vx -= (dx / dist) * f;
       b.vy -= (dy / dist) * f;
     }
     for (const n of geNodes) {
-      n.vx += (w / 2 - n.x) * 0.001 * alpha;
-      n.vy += (h / 2 - n.y) * 0.001 * alpha;
-      n.vx *= 0.85;
-      n.vy *= 0.85;
+      n.vx += (w / 2 - n.x) * SIM_GRAVITY * alpha;
+      n.vy += (h / 2 - n.y) * SIM_GRAVITY * alpha;
+      n.vx *= SIM_DAMPING;
+      n.vy *= SIM_DAMPING;
       n.x += n.vx;
       n.y += n.vy;
-      n.x = Math.max(24, Math.min(w - 24, n.x));
-      n.y = Math.max(24, Math.min(h - 24, n.y));
+      n.x = Math.max(SIM_NODE_MARGIN, Math.min(w - SIM_NODE_MARGIN, n.x));
+      n.y = Math.max(SIM_NODE_MARGIN, Math.min(h - SIM_NODE_MARGIN, n.y));
     }
     draw();
     iter++;
-    if (iter < 200) geAnim = requestAnimationFrame(tick);
+    if (iter < SIM_GE_MAX_ITERS) geAnim = requestAnimationFrame(tick);
   }
   tick();
   document.getElementById("ge-info").innerHTML =
-    "<b>" + geNodes.length + "</b> nodes, <b>" + geEdges.length + "</b> edges";
+    `<b>${geNodes.length}</b> nodes, <b>${geEdges.length}</b> edges`;
 }
 
 async function loadCollections() {
+  //  collections
   const r = await apiCall("/api/collections");
   const picker = document.getElementById("collectionPicker");
   // keep first option (Default)
@@ -1916,13 +1845,14 @@ async function loadCollections() {
     r.data.collections.forEach((c) => {
       const opt = document.createElement("option");
       opt.value = c.name;
-      opt.textContent = c.name + " (" + c.vector_count + " vectors)";
+      opt.textContent = `${c.name} (${c.vector_count} vectors)`;
       picker.appendChild(opt);
     });
     if (r.data.collections.length > 0)
       document.getElementById("collectionPickerWrap").style.display = "";
   }
 }
+
 document
   .getElementById("collectionPicker")
   .addEventListener("change", function () {
@@ -1931,6 +1861,7 @@ document
 loadCollections();
 
 async function loadCluster() {
+  // cluster
   const r = await apiCall("/api/cluster/info");
   if (r.ok) {
     document.getElementById("cl-nodes").textContent = r.data.total_nodes;
@@ -1968,6 +1899,8 @@ async function loadCluster() {
     document.getElementById("cluster-shard-empty").style.display = "none";
   }
 }
+
+// navigation/ routing
 
 const viewHooks = {
   monitoring: () => {
