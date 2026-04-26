@@ -324,10 +324,9 @@ from ._core import (
     ExpandedSearchHit,
     EntityLinker,
 )
-from .dashboard.server import DashboardServer
-from .async_api import AsyncDatabase
-from .pool import DatabasePool
-from .benchmark import Benchmark, BenchmarkResult
+
+from .dashboard.backend.server import DashboardServer
+
 
 __all__ = [
     "AsyncDatabase",
