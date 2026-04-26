@@ -154,7 +154,7 @@ static void stream_process_embedded_batch(GV_StreamConsumer *consumer) {
         for (size_t j = 0; j < dimension; j++) {
             uint64_t mix = (uint64_t)(off * 1315423911u) ^ (uint64_t)j * 2654435761u;
             float x = (float)(mix % 1000u) * 0.001f - 0.5f;
-            ((float *)payload)[j] = x;
+            memcpy(payload + j * sizeof(float), &x, sizeof(float));
         }
 
         GV_StreamMessage msg;

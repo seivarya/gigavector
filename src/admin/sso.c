@@ -549,10 +549,8 @@ static int base64url_decode(const char *in, size_t in_len,
     while (i < in_len) {
         uint32_t a = 0, b = 0, c = 0, d = 0;
 
-        if (i < in_len) {
-            if (!is_b64url_char((unsigned char)in[i])) return -1;
-            a = b64url_table[(unsigned char)in[i++]];
-        }
+        if (!is_b64url_char((unsigned char)in[i])) return -1;
+        a = b64url_table[(unsigned char)in[i++]];
         if (i < in_len) {
             if (!is_b64url_char((unsigned char)in[i])) return -1;
             b = b64url_table[(unsigned char)in[i++]];

@@ -487,7 +487,8 @@ int kdtree_knn_search(const GV_KDNode *root, const GV_SoAStorage *storage, const
                     }
                     src = src->next;
                 }
-                copy->metadata = dst_head;
+                if (copy != NULL)
+                    copy->metadata = dst_head;
             }
             ctx.results[i].vector = copy;
         }
@@ -561,7 +562,8 @@ int kdtree_knn_search_filtered(const GV_KDNode *root, const GV_SoAStorage *stora
                     }
                     src = src->next;
                 }
-                copy->metadata = dst_head;
+                if (copy != NULL)
+                    copy->metadata = dst_head;
             }
             ctx.results[i].vector = copy;
         }

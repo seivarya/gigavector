@@ -562,9 +562,8 @@ int gv_ivfpq_insert(void *index_ptr, GV_Vector *vector) {
             } else {
                 memcpy(sqv->min_vals, idx->scalar_quant_template->min_vals, nvals * sizeof(float));
                 memcpy(sqv->max_vals, idx->scalar_quant_template->max_vals, nvals * sizeof(float));
-            }
-            sqv->quantized = (uint8_t *)calloc(sqv->bytes_per_vector, sizeof(uint8_t));
-            if (sqv->quantized != NULL) {
+                sqv->quantized = (uint8_t *)calloc(sqv->bytes_per_vector, sizeof(uint8_t));
+                if (sqv->quantized != NULL) {
                 size_t max_quant = (1ULL << sqv->bits) - 1;
                 for (size_t i = 0; i < idx->dimension; ++i) {
                     float min_val = sqv->per_dimension ? sqv->min_vals[i] : sqv->min_vals[0];
