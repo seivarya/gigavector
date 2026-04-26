@@ -10,7 +10,7 @@ from gigavector import (
     ReplicationManager,
     ReplicationConfig,
 )
-from gigavector.dashboard.server import DashboardServer
+from gigavector.dashboard.backend.server import DashboardServer
 
 
 class TestAPI(unittest.TestCase):
@@ -53,9 +53,9 @@ class TestAPI(unittest.TestCase):
         self.assertFalse(server.is_running())
 
         with mock.patch(
-            "gigavector.dashboard.server._DashboardHTTPServer", return_value=new_httpd
+            "gigavector.dashboard.backend.server._DashboardHTTPServer", return_value=new_httpd
         ) as httpd_cls, mock.patch(
-            "gigavector.dashboard.server.threading.Thread", return_value=new_thread
+            "gigavector.dashboard.backend.server.threading.Thread", return_value=new_thread
         ) as thread_cls:
             server.start()
 
