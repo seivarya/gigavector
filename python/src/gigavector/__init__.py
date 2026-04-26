@@ -325,8 +325,15 @@ from ._core import (
     EntityLinker,
 )
 from .dashboard.server import DashboardServer
+from .async_api import AsyncDatabase
+from .pool import DatabasePool
+from .benchmark import Benchmark, BenchmarkResult
 
 __all__ = [
+    "AsyncDatabase",
+    "DatabasePool",
+    "Benchmark",
+    "BenchmarkResult",
     "Database",
     "DBStats",
     "DistanceType",

@@ -232,7 +232,16 @@ static int test_pause_resume(void) {
     rc = stream_pause(consumer);
     /* rc == 0 means paused, non-zero means already stopped — both OK */
 
-    GV_StreamState state = stream_get_state(consumer);
+    /* wait up to 200ms for pause to take effect */
+    int waited = 0;
+    GV_StreamState state;
+    do {
+        state = stream_get_state(consumer);
+        if (state != GV_STREAM_RUNNING) break;
+        usleep(10000); /* 10ms */
+        waited += 10;
+    } while (waited < 200);
+
     ASSERT(state == GV_STREAM_PAUSED || state == GV_STREAM_STOPPED || state == GV_STREAM_ERROR,
            "state after pause should be PAUSED, STOPPED, or ERROR");
 
@@ -351,6 +360,18 @@ static int test_actual_ingestion(void) {
 
     rc = stream_stop(consumer);
     ASSERT(rc == 0, "stream_stop should succeed");
+
+    /* wait up to 200ms for stop to take effect */
+    {
+        int stop_waited = 0;
+        GV_StreamState stop_state;
+        do {
+            stop_state = stream_get_state(consumer);
+            if (stop_state != GV_STREAM_RUNNING) break;
+            usleep(10000); /* 10ms */
+            stop_waited += 10;
+        } while (stop_waited < 200);
+    }
 
     GV_StreamStats stats;
     rc = stream_get_stats(consumer, &stats);
