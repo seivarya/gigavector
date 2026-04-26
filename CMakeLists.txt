@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.15)
-project(GigaVector VERSION 0.8.16 LANGUAGES C)
+project(GigaVector VERSION 0.8.17 LANGUAGES C)
 
 # Install directory conventions
 include(GNUInstallDirs)
@@ -52,11 +52,11 @@ if(WIN32 AND BUILD_SHARED_LIBS)
 endif()
 
 if(MINGW)
-    set(CMAKE_FIND_LIBRARY_SUFFIXES .a .dll.a .lib)
-    set(CURL_USE_STATIC_LIBS ON)
-    set(OPENSSL_USE_STATIC_LIBS ON)
+    # Static-link libgcc (no transitive deps) and pthread.
+    # curl, ssl, crypto etc. remain dynamic so delvewheel can bundle them all
+    # (including their transitive deps: zlib, brotli, etc.) into the wheel.
     set(CMAKE_SHARED_LINKER_FLAGS
-        "${CMAKE_SHARED_LINKER_FLAGS} -static-libgcc -Wl,-Bstatic -lpthread -lcurl -lssl -lcrypto -Wl,-Bdynamic -lws2_32 -lcrypt32 -lgdi32 -lbcrypt -lwldap32")
+        "${CMAKE_SHARED_LINKER_FLAGS} -static-libgcc -Wl,-Bstatic -lpthread -Wl,-Bdynamic")
     set(CMAKE_EXE_LINKER_FLAGS
         "${CMAKE_EXE_LINKER_FLAGS} -static-libgcc")
 endif()

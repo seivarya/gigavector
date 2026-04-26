@@ -3048,7 +3048,9 @@ def _register_windows_dll_dirs(lib_path: Path, here: Path) -> None:
         return
 
     seen: set[str] = set()
-    candidates = [here, lib_path.parent]
+    # Include the .libs subdir: delvewheel places renamed bundled DLLs there
+    # for .pyd extensions; for plain DLLs it uses the same dir, but check both.
+    candidates = [here, here / ".libs", lib_path.parent]
 
     path_env = os.environ.get("PATH", "")
     for entry in path_env.split(os.pathsep):
@@ -3105,16 +3107,6 @@ def _load_lib() -> "FFIType.CData":
     for lib_path in candidate_paths:
         if lib_path.exists():
             _register_windows_dll_dirs(lib_path, here)
-            if os.name == "nt":
-                import ctypes
-                # Pre-load via ctypes so Windows caches the handle with the
-                # secure search path (LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR).
-                # CFFI's own LoadLibraryW then reuses the cached handle instead
-                # of failing because it doesn't search add_dll_directory dirs.
-                try:
-                    ctypes.CDLL(os.fspath(lib_path))
-                except OSError:
-                    pass
             return ffi.dlopen(os.fspath(lib_path))
     raise FileNotFoundError(f"GigaVector shared library not found in {candidate_paths}")
 
