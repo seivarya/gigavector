@@ -18,7 +18,7 @@ DATA_DIR    := snapshots
 BENCH_DIR   := $(BUILD_DIR)/bench
 
 LIB_NAME    := GigaVector
-LIB_VERSION := 0.8.8
+LIB_VERSION := 0.8.9
 STATIC_LIB  := $(LIB_DIR)/lib$(LIB_NAME).a
 
 UNAME_S := $(shell uname -s)
