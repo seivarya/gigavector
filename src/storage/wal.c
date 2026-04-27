@@ -27,25 +27,6 @@ struct GV_WAL {
     uint32_t version;
 };
 
-/* Simple CRC32 (polynomial 0xEDB88320), tableless for portability */
-static uint32_t crc32_init(void) {
-    return 0xFFFFFFFFu;
-}
-
-static uint32_t crc32_update(uint32_t crc, const void *data, size_t len) {
-    const uint8_t *p = (const uint8_t *)data;
-    for (size_t i = 0; i < len; ++i) {
-        crc ^= p[i];
-        for (int k = 0; k < 8; ++k) {
-            crc = (crc >> 1) ^ (0xEDB88320u & (0u - (crc & 1u)));
-        }
-    }
-    return crc;
-}
-
-static uint32_t crc32_finish(uint32_t crc) {
-    return crc ^ 0xFFFFFFFFu;
-}
 
 static int wal_sync(FILE *f) {
     if (fflush(f) != 0) return -1;
@@ -146,28 +127,33 @@ int wal_append_insert(GV_WAL *wal, const float *data, size_t dimension,
         return -1;
     }
 
-    uint32_t crc = crc32_init();
+    uint32_t crc = gv_crc32_init();
 
     if (write_u8(wal->file, GV_WAL_TYPE_INSERT) != 0) return -1;
-    crc = crc32_update(crc, &(uint8_t){GV_WAL_TYPE_INSERT}, sizeof(uint8_t));
+    crc = gv_crc32_update(crc, &(uint8_t){GV_WAL_TYPE_INSERT}, sizeof(uint8_t));
     if (write_u32(wal->file, (uint32_t)dimension) != 0) return -1;
     uint32_t dim_u32 = (uint32_t)dimension;
-    crc = crc32_update(crc, &dim_u32, sizeof(uint32_t));
+    crc = gv_crc32_update(crc, &dim_u32, sizeof(uint32_t));
     if (write_floats(wal->file, data, dimension) != 0) return -1;
-    crc = crc32_update(crc, data, dimension * sizeof(float));
+    crc = gv_crc32_update(crc, data, dimension * sizeof(float));
 
     uint32_t meta_count = (metadata_key != NULL && metadata_value != NULL) ? 1u : 0u;
     if (write_u32(wal->file, meta_count) != 0) return -1;
-    crc = crc32_update(crc, &meta_count, sizeof(uint32_t));
+    crc = gv_crc32_update(crc, &meta_count, sizeof(uint32_t));
     if (meta_count == 1u) {
         if (write_string(wal->file, metadata_key) != 0) return -1;
         uint32_t klen = (uint32_t)strlen(metadata_key);
-        crc = crc32_update(crc, &klen, sizeof(uint32_t));
-        crc = crc32_update(crc, metadata_key, klen);
+        crc = gv_crc32_update(crc, &klen, sizeof(uint32_t));
+        crc = gv_crc32_update(crc, metadata_key, klen);
         if (write_string(wal->file, metadata_value) != 0) return -1;
         uint32_t vlen = (uint32_t)strlen(metadata_value);
-        crc = crc32_update(crc, &vlen, sizeof(uint32_t));
-        crc = crc32_update(crc, metadata_value, vlen);
+        crc = gv_crc32_update(crc, &vlen, sizeof(uint32_t));
+        crc = gv_crc32_update(crc, metadata_value, vlen);
+    }
+
+    if (wal->version >= 2) {
+        crc = gv_crc32_finish(crc);
+        if (write_u32(wal->file, crc) != 0) return -1;
     }
 
     if (wal_sync(wal->file) != 0) {
@@ -189,19 +175,19 @@ int wal_append_insert_rich(GV_WAL *wal, const float *data, size_t dimension,
         return -1;
     }
 
-    uint32_t crc = crc32_init();
+    uint32_t crc = gv_crc32_init();
 
     if (write_u8(wal->file, GV_WAL_TYPE_INSERT) != 0) return -1;
-    crc = crc32_update(crc, &(uint8_t){GV_WAL_TYPE_INSERT}, sizeof(uint8_t));
+    crc = gv_crc32_update(crc, &(uint8_t){GV_WAL_TYPE_INSERT}, sizeof(uint8_t));
     if (write_u32(wal->file, (uint32_t)dimension) != 0) return -1;
     uint32_t dim_u32 = (uint32_t)dimension;
-    crc = crc32_update(crc, &dim_u32, sizeof(uint32_t));
+    crc = gv_crc32_update(crc, &dim_u32, sizeof(uint32_t));
     if (write_floats(wal->file, data, dimension) != 0) return -1;
-    crc = crc32_update(crc, data, dimension * sizeof(float));
+    crc = gv_crc32_update(crc, data, dimension * sizeof(float));
 
     uint32_t meta_count_u32 = (uint32_t)metadata_count;
     if (write_u32(wal->file, meta_count_u32) != 0) return -1;
-    crc = crc32_update(crc, &meta_count_u32, sizeof(uint32_t));
+    crc = gv_crc32_update(crc, &meta_count_u32, sizeof(uint32_t));
     
     for (size_t i = 0; i < metadata_count; i++) {
         if (metadata_keys[i] == NULL || metadata_values[i] == NULL) {
@@ -209,16 +195,16 @@ int wal_append_insert_rich(GV_WAL *wal, const float *data, size_t dimension,
         }
         if (write_string(wal->file, metadata_keys[i]) != 0) return -1;
         uint32_t klen = (uint32_t)strlen(metadata_keys[i]);
-        crc = crc32_update(crc, &klen, sizeof(uint32_t));
-        crc = crc32_update(crc, metadata_keys[i], klen);
+        crc = gv_crc32_update(crc, &klen, sizeof(uint32_t));
+        crc = gv_crc32_update(crc, metadata_keys[i], klen);
         if (write_string(wal->file, metadata_values[i]) != 0) return -1;
         uint32_t vlen = (uint32_t)strlen(metadata_values[i]);
-        crc = crc32_update(crc, &vlen, sizeof(uint32_t));
-        crc = crc32_update(crc, metadata_values[i], vlen);
+        crc = gv_crc32_update(crc, &vlen, sizeof(uint32_t));
+        crc = gv_crc32_update(crc, metadata_values[i], vlen);
     }
 
     if (wal->version >= 2) {
-        crc = crc32_finish(crc);
+        crc = gv_crc32_finish(crc);
         if (write_u32(wal->file, crc) != 0) return -1;
     }
 
@@ -233,17 +219,17 @@ int wal_append_delete(GV_WAL *wal, size_t vector_index) {
         return -1;
     }
 
-    uint32_t crc = crc32_init();
+    uint32_t crc = gv_crc32_init();
 
     if (write_u8(wal->file, GV_WAL_TYPE_DELETE) != 0) return -1;
-    crc = crc32_update(crc, &(uint8_t){GV_WAL_TYPE_DELETE}, sizeof(uint8_t));
+    crc = gv_crc32_update(crc, &(uint8_t){GV_WAL_TYPE_DELETE}, sizeof(uint8_t));
     
     uint64_t index_u64 = (uint64_t)vector_index;
     if (fwrite(&index_u64, sizeof(uint64_t), 1, wal->file) != 1) return -1;
-    crc = crc32_update(crc, &index_u64, sizeof(uint64_t));
+    crc = gv_crc32_update(crc, &index_u64, sizeof(uint64_t));
 
     if (wal->version >= 2) {
-        crc = crc32_finish(crc);
+        crc = gv_crc32_finish(crc);
         if (write_u32(wal->file, crc) != 0) return -1;
     }
 
@@ -258,24 +244,24 @@ int wal_append_update(GV_WAL *wal, size_t vector_index, const float *data, size_
         return -1;
     }
 
-    uint32_t crc = crc32_init();
+    uint32_t crc = gv_crc32_init();
 
     if (write_u8(wal->file, GV_WAL_TYPE_UPDATE) != 0) return -1;
-    crc = crc32_update(crc, &(uint8_t){GV_WAL_TYPE_UPDATE}, sizeof(uint8_t));
+    crc = gv_crc32_update(crc, &(uint8_t){GV_WAL_TYPE_UPDATE}, sizeof(uint8_t));
     
     uint64_t index_u64 = (uint64_t)vector_index;
     if (fwrite(&index_u64, sizeof(uint64_t), 1, wal->file) != 1) return -1;
-    crc = crc32_update(crc, &index_u64, sizeof(uint64_t));
+    crc = gv_crc32_update(crc, &index_u64, sizeof(uint64_t));
     
     if (write_u32(wal->file, (uint32_t)dimension) != 0) return -1;
     uint32_t dim_u32 = (uint32_t)dimension;
-    crc = crc32_update(crc, &dim_u32, sizeof(uint32_t));
+    crc = gv_crc32_update(crc, &dim_u32, sizeof(uint32_t));
     if (write_floats(wal->file, data, dimension) != 0) return -1;
-    crc = crc32_update(crc, data, dimension * sizeof(float));
+    crc = gv_crc32_update(crc, data, dimension * sizeof(float));
 
     uint32_t meta_count_u32 = (uint32_t)metadata_count;
     if (write_u32(wal->file, meta_count_u32) != 0) return -1;
-    crc = crc32_update(crc, &meta_count_u32, sizeof(uint32_t));
+    crc = gv_crc32_update(crc, &meta_count_u32, sizeof(uint32_t));
     
     for (size_t i = 0; i < metadata_count; i++) {
         if (metadata_keys[i] == NULL || metadata_values[i] == NULL) {
@@ -283,16 +269,16 @@ int wal_append_update(GV_WAL *wal, size_t vector_index, const float *data, size_
         }
         if (write_string(wal->file, metadata_keys[i]) != 0) return -1;
         uint32_t klen = (uint32_t)strlen(metadata_keys[i]);
-        crc = crc32_update(crc, &klen, sizeof(uint32_t));
-        crc = crc32_update(crc, metadata_keys[i], klen);
+        crc = gv_crc32_update(crc, &klen, sizeof(uint32_t));
+        crc = gv_crc32_update(crc, metadata_keys[i], klen);
         if (write_string(wal->file, metadata_values[i]) != 0) return -1;
         uint32_t vlen = (uint32_t)strlen(metadata_values[i]);
-        crc = crc32_update(crc, &vlen, sizeof(uint32_t));
-        crc = crc32_update(crc, metadata_values[i], vlen);
+        crc = gv_crc32_update(crc, &vlen, sizeof(uint32_t));
+        crc = gv_crc32_update(crc, metadata_values[i], vlen);
     }
 
     if (wal->version >= 2) {
-        crc = crc32_finish(crc);
+        crc = gv_crc32_finish(crc);
         if (write_u32(wal->file, crc) != 0) return -1;
     }
 
@@ -355,11 +341,11 @@ int wal_replay(const char *path, size_t expected_dimension,
                 return -1;
             }
             if (has_crc) {
-                uint32_t crc = crc32_init();
+                uint32_t crc = gv_crc32_init();
                 uint8_t type_byte = GV_WAL_TYPE_DELETE;
-                crc = crc32_update(crc, &type_byte, sizeof(uint8_t));
-                crc = crc32_update(crc, &index_u64, sizeof(uint64_t));
-                crc = crc32_finish(crc);
+                crc = gv_crc32_update(crc, &type_byte, sizeof(uint8_t));
+                crc = gv_crc32_update(crc, &index_u64, sizeof(uint64_t));
+                crc = gv_crc32_finish(crc);
                 uint32_t stored_crc = 0;
                 if (read_u32(f, &stored_crc) != 0 || stored_crc != crc) {
                     fclose(f);
@@ -400,6 +386,11 @@ int wal_replay(const char *path, size_t expected_dimension,
             
             char **keys = NULL;
             char **values = NULL;
+            if (meta_count > 65536) {
+                free(buf);
+                fclose(f);
+                return -1;
+            }
             if (meta_count > 0) {
                 keys = (char **)malloc(sizeof(char *) * meta_count);
                 values = (char **)malloc(sizeof(char *) * meta_count);
@@ -428,24 +419,24 @@ int wal_replay(const char *path, size_t expected_dimension,
             }
 
             if (has_crc) {
-                uint32_t crc = crc32_init();
+                uint32_t crc = gv_crc32_init();
                 uint8_t type_byte = GV_WAL_TYPE_UPDATE;
-                crc = crc32_update(crc, &type_byte, sizeof(uint8_t));
-                crc = crc32_update(crc, &index_u64, sizeof(uint64_t));
-                crc = crc32_update(crc, &dim, sizeof(uint32_t));
-                crc = crc32_update(crc, buf, dim * sizeof(float));
-                crc = crc32_update(crc, &meta_count, sizeof(uint32_t));
+                crc = gv_crc32_update(crc, &type_byte, sizeof(uint8_t));
+                crc = gv_crc32_update(crc, &index_u64, sizeof(uint64_t));
+                crc = gv_crc32_update(crc, &dim, sizeof(uint32_t));
+                crc = gv_crc32_update(crc, buf, dim * sizeof(float));
+                crc = gv_crc32_update(crc, &meta_count, sizeof(uint32_t));
                 for (uint32_t i = 0; i < meta_count; ++i) {
                     if (keys[i] && values[i]) {
                         uint32_t klen = (uint32_t)strlen(keys[i]);
                         uint32_t vlen = (uint32_t)strlen(values[i]);
-                        crc = crc32_update(crc, &klen, sizeof(uint32_t));
-                        crc = crc32_update(crc, keys[i], klen);
-                        crc = crc32_update(crc, &vlen, sizeof(uint32_t));
-                        crc = crc32_update(crc, values[i], vlen);
+                        crc = gv_crc32_update(crc, &klen, sizeof(uint32_t));
+                        crc = gv_crc32_update(crc, keys[i], klen);
+                        crc = gv_crc32_update(crc, &vlen, sizeof(uint32_t));
+                        crc = gv_crc32_update(crc, values[i], vlen);
                     }
                 }
-                crc = crc32_finish(crc);
+                crc = gv_crc32_finish(crc);
                 uint32_t stored_crc = 0;
                 if (read_u32(f, &stored_crc) != 0 || stored_crc != crc) {
                     for (uint32_t i = 0; i < meta_count; ++i) {
@@ -497,6 +488,11 @@ int wal_replay(const char *path, size_t expected_dimension,
             
             char **keys = NULL;
             char **values = NULL;
+            if (meta_count > 65536) {
+                free(buf);
+                fclose(f);
+                return -1;
+            }
             if (meta_count > 0) {
                 keys = (char **)malloc(sizeof(char *) * meta_count);
                 values = (char **)malloc(sizeof(char *) * meta_count);
@@ -525,23 +521,23 @@ int wal_replay(const char *path, size_t expected_dimension,
             }
 
             if (has_crc) {
-                uint32_t crc = crc32_init();
+                uint32_t crc = gv_crc32_init();
                 uint8_t type_byte = GV_WAL_TYPE_INSERT;
-                crc = crc32_update(crc, &type_byte, sizeof(uint8_t));
-                crc = crc32_update(crc, &dim, sizeof(uint32_t));
-                crc = crc32_update(crc, buf, dim * sizeof(float));
-                crc = crc32_update(crc, &meta_count, sizeof(uint32_t));
+                crc = gv_crc32_update(crc, &type_byte, sizeof(uint8_t));
+                crc = gv_crc32_update(crc, &dim, sizeof(uint32_t));
+                crc = gv_crc32_update(crc, buf, dim * sizeof(float));
+                crc = gv_crc32_update(crc, &meta_count, sizeof(uint32_t));
                 for (uint32_t i = 0; i < meta_count; i++) {
                     if (keys[i] && values[i]) {
                         uint32_t klen = (uint32_t)strlen(keys[i]);
                         uint32_t vlen = (uint32_t)strlen(values[i]);
-                        crc = crc32_update(crc, &klen, sizeof(uint32_t));
-                        crc = crc32_update(crc, keys[i], klen);
-                        crc = crc32_update(crc, &vlen, sizeof(uint32_t));
-                        crc = crc32_update(crc, values[i], vlen);
+                        crc = gv_crc32_update(crc, &klen, sizeof(uint32_t));
+                        crc = gv_crc32_update(crc, keys[i], klen);
+                        crc = gv_crc32_update(crc, &vlen, sizeof(uint32_t));
+                        crc = gv_crc32_update(crc, values[i], vlen);
                     }
                 }
-                crc = crc32_finish(crc);
+                crc = gv_crc32_finish(crc);
                 uint32_t stored_crc = 0;
                 if (read_u32(f, &stored_crc) != 0 || stored_crc != crc) {
                     for (uint32_t i = 0; i < meta_count; i++) {
@@ -600,6 +596,10 @@ int wal_replay_rich(const char *path, size_t expected_dimension,
                        int (*on_insert)(void *ctx, const float *data, size_t dimension,
                                         const char *const *metadata_keys, const char *const *metadata_values,
                                         size_t metadata_count),
+                       int (*on_delete)(void *ctx, size_t vector_index),
+                       int (*on_update)(void *ctx, size_t vector_index, const float *data,
+                                        size_t dimension, const char *const *metadata_keys,
+                                        const char *const *metadata_values, size_t metadata_count),
                        void *ctx, uint32_t expected_index_type) {
     if (path == NULL || expected_dimension == 0 || on_insert == NULL) {
         return -1;
@@ -652,18 +652,21 @@ int wal_replay_rich(const char *path, size_t expected_dimension,
                 return -1;
             }
             if (has_crc) {
-                uint32_t crc = crc32_init();
+                uint32_t crc = gv_crc32_init();
                 uint8_t type_byte = GV_WAL_TYPE_DELETE;
-                crc = crc32_update(crc, &type_byte, sizeof(uint8_t));
-                crc = crc32_update(crc, &index_u64, sizeof(uint64_t));
-                crc = crc32_finish(crc);
+                crc = gv_crc32_update(crc, &type_byte, sizeof(uint8_t));
+                crc = gv_crc32_update(crc, &index_u64, sizeof(uint64_t));
+                crc = gv_crc32_finish(crc);
                 uint32_t stored_crc = 0;
                 if (read_u32(f, &stored_crc) != 0 || stored_crc != crc) {
                     fclose(f);
                     return -1;
                 }
             }
-            /* Skip delete records in replay - they are handled during load */
+            if (on_delete != NULL) {
+                int cb_res = on_delete(ctx, (size_t)index_u64);
+                if (cb_res != 0) { fclose(f); return -1; }
+            }
             continue;
         }
 
@@ -697,6 +700,11 @@ int wal_replay_rich(const char *path, size_t expected_dimension,
             
             char **keys = NULL;
             char **values = NULL;
+            if (meta_count > 65536) {
+                free(buf);
+                fclose(f);
+                return -1;
+            }
             if (meta_count > 0) {
                 keys = (char **)malloc(sizeof(char *) * meta_count);
                 values = (char **)malloc(sizeof(char *) * meta_count);
@@ -725,24 +733,24 @@ int wal_replay_rich(const char *path, size_t expected_dimension,
             }
 
             if (has_crc) {
-                uint32_t crc = crc32_init();
+                uint32_t crc = gv_crc32_init();
                 uint8_t type_byte = GV_WAL_TYPE_UPDATE;
-                crc = crc32_update(crc, &type_byte, sizeof(uint8_t));
-                crc = crc32_update(crc, &index_u64, sizeof(uint64_t));
-                crc = crc32_update(crc, &dim, sizeof(uint32_t));
-                crc = crc32_update(crc, buf, dim * sizeof(float));
-                crc = crc32_update(crc, &meta_count, sizeof(uint32_t));
+                crc = gv_crc32_update(crc, &type_byte, sizeof(uint8_t));
+                crc = gv_crc32_update(crc, &index_u64, sizeof(uint64_t));
+                crc = gv_crc32_update(crc, &dim, sizeof(uint32_t));
+                crc = gv_crc32_update(crc, buf, dim * sizeof(float));
+                crc = gv_crc32_update(crc, &meta_count, sizeof(uint32_t));
                 for (uint32_t i = 0; i < meta_count; ++i) {
                     if (keys[i] && values[i]) {
                         uint32_t klen = (uint32_t)strlen(keys[i]);
                         uint32_t vlen = (uint32_t)strlen(values[i]);
-                        crc = crc32_update(crc, &klen, sizeof(uint32_t));
-                        crc = crc32_update(crc, keys[i], klen);
-                        crc = crc32_update(crc, &vlen, sizeof(uint32_t));
-                        crc = crc32_update(crc, values[i], vlen);
+                        crc = gv_crc32_update(crc, &klen, sizeof(uint32_t));
+                        crc = gv_crc32_update(crc, keys[i], klen);
+                        crc = gv_crc32_update(crc, &vlen, sizeof(uint32_t));
+                        crc = gv_crc32_update(crc, values[i], vlen);
                     }
                 }
-                crc = crc32_finish(crc);
+                crc = gv_crc32_finish(crc);
                 uint32_t stored_crc = 0;
                 if (read_u32(f, &stored_crc) != 0 || stored_crc != crc) {
                     for (uint32_t i = 0; i < meta_count; ++i) {
@@ -757,14 +765,26 @@ int wal_replay_rich(const char *path, size_t expected_dimension,
                 }
             }
             
-            for (uint32_t i = 0; i < meta_count; ++i) {
-                free(keys[i]);
-                free(values[i]);
+            if (on_update != NULL) {
+                int cb_res = on_update(ctx, (size_t)index_u64, buf, dim,
+                    (const char *const *)keys, (const char *const *)values, meta_count);
+                for (uint32_t i = 0; i < meta_count; ++i) {
+                    free(keys[i]);
+                    free(values[i]);
+                }
+                free(keys);
+                free(values);
+                free(buf);
+                if (cb_res != 0) { fclose(f); return -1; }
+            } else {
+                for (uint32_t i = 0; i < meta_count; ++i) {
+                    free(keys[i]);
+                    free(values[i]);
+                }
+                free(keys);
+                free(values);
+                free(buf);
             }
-            free(keys);
-            free(values);
-            free(buf);
-            /* Skip update records in replay - they modify already-inserted vectors */
             continue;
         }
 
@@ -793,6 +813,11 @@ int wal_replay_rich(const char *path, size_t expected_dimension,
 
             char **keys = NULL;
             char **values = NULL;
+            if (meta_count > 65536) {
+                free(buf);
+                fclose(f);
+                return -1;
+            }
             if (meta_count > 0) {
                 keys = (char **)malloc(sizeof(char *) * meta_count);
                 values = (char **)malloc(sizeof(char *) * meta_count);
@@ -821,23 +846,23 @@ int wal_replay_rich(const char *path, size_t expected_dimension,
             }
 
             if (has_crc) {
-                uint32_t crc = crc32_init();
+                uint32_t crc = gv_crc32_init();
                 uint8_t type_byte = GV_WAL_TYPE_INSERT;
-                crc = crc32_update(crc, &type_byte, sizeof(uint8_t));
-                crc = crc32_update(crc, &dim, sizeof(uint32_t));
-                crc = crc32_update(crc, buf, dim * sizeof(float));
-                crc = crc32_update(crc, &meta_count, sizeof(uint32_t));
+                crc = gv_crc32_update(crc, &type_byte, sizeof(uint8_t));
+                crc = gv_crc32_update(crc, &dim, sizeof(uint32_t));
+                crc = gv_crc32_update(crc, buf, dim * sizeof(float));
+                crc = gv_crc32_update(crc, &meta_count, sizeof(uint32_t));
                 for (uint32_t i = 0; i < meta_count; i++) {
                     if (keys[i] && values[i]) {
                         uint32_t klen = (uint32_t)strlen(keys[i]);
                         uint32_t vlen = (uint32_t)strlen(values[i]);
-                        crc = crc32_update(crc, &klen, sizeof(uint32_t));
-                        crc = crc32_update(crc, keys[i], klen);
-                        crc = crc32_update(crc, &vlen, sizeof(uint32_t));
-                        crc = crc32_update(crc, values[i], vlen);
+                        crc = gv_crc32_update(crc, &klen, sizeof(uint32_t));
+                        crc = gv_crc32_update(crc, keys[i], klen);
+                        crc = gv_crc32_update(crc, &vlen, sizeof(uint32_t));
+                        crc = gv_crc32_update(crc, values[i], vlen);
                     }
                 }
-                crc = crc32_finish(crc);
+                crc = gv_crc32_finish(crc);
                 uint32_t stored_crc = 0;
                 if (read_u32(f, &stored_crc) != 0 || stored_crc != crc) {
                     for (uint32_t i = 0; i < meta_count; i++) {
@@ -882,7 +907,7 @@ int wal_dump(const char *path, size_t expected_dimension, uint32_t expected_inde
 
     FILE *f = fopen(path, "rb");
     if (f == NULL) {
-        return (errno == ENOENT) ? -1 : -1;
+        return (errno == ENOENT) ? 0 : -1;
     }
 
     char magic[4] = {0};
@@ -947,6 +972,11 @@ int wal_dump(const char *path, size_t expected_dimension, uint32_t expected_inde
             
             char **keys = NULL;
             char **values = NULL;
+            if (meta_count > 65536) {
+                free(buf);
+                fclose(f);
+                return -1;
+            }
             if (meta_count > 0) {
                 keys = (char **)malloc(sizeof(char *) * meta_count);
                 values = (char **)malloc(sizeof(char *) * meta_count);
@@ -975,23 +1005,23 @@ int wal_dump(const char *path, size_t expected_dimension, uint32_t expected_inde
             }
 
             if (has_crc) {
-                uint32_t crc = crc32_init();
+                uint32_t crc = gv_crc32_init();
                 uint8_t type_byte = GV_WAL_TYPE_INSERT;
-                crc = crc32_update(crc, &type_byte, sizeof(uint8_t));
-                crc = crc32_update(crc, &dim, sizeof(uint32_t));
-                crc = crc32_update(crc, buf, dim * sizeof(float));
-                crc = crc32_update(crc, &meta_count, sizeof(uint32_t));
+                crc = gv_crc32_update(crc, &type_byte, sizeof(uint8_t));
+                crc = gv_crc32_update(crc, &dim, sizeof(uint32_t));
+                crc = gv_crc32_update(crc, buf, dim * sizeof(float));
+                crc = gv_crc32_update(crc, &meta_count, sizeof(uint32_t));
                 for (uint32_t i = 0; i < meta_count; i++) {
                     if (keys[i] && values[i]) {
                         uint32_t klen = (uint32_t)strlen(keys[i]);
                         uint32_t vlen = (uint32_t)strlen(values[i]);
-                        crc = crc32_update(crc, &klen, sizeof(uint32_t));
-                        crc = crc32_update(crc, keys[i], klen);
-                        crc = crc32_update(crc, &vlen, sizeof(uint32_t));
-                        crc = crc32_update(crc, values[i], vlen);
+                        crc = gv_crc32_update(crc, &klen, sizeof(uint32_t));
+                        crc = gv_crc32_update(crc, keys[i], klen);
+                        crc = gv_crc32_update(crc, &vlen, sizeof(uint32_t));
+                        crc = gv_crc32_update(crc, values[i], vlen);
                     }
                 }
-                crc = crc32_finish(crc);
+                crc = gv_crc32_finish(crc);
                 uint32_t stored_crc = 0;
                 if (read_u32(f, &stored_crc) != 0 || stored_crc != crc) {
                     for (uint32_t i = 0; i < meta_count; i++) {

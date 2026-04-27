@@ -227,19 +227,26 @@ install(TARGETS gvbackup gvrestore gvinspect
 # Sanitizers — ASAN and TSAN are mutually exclusive; ENABLE_SANITIZERS uses ASAN+UBSAN.
 # Use ENABLE_TSAN for a separate thread-sanitizer build.
 option(ENABLE_TSAN "Enable ThreadSanitizer (incompatible with ASAN)" OFF)
+
+# Collect sanitizer/coverage flags into an INTERFACE target so they are applied
+# per-target via transitive linkage rather than polluting global flag variables.
+add_library(gv_instrumentation_flags INTERFACE)
+
 if(ENABLE_TSAN)
-    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fsanitize=thread -fno-omit-frame-pointer")
-    set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -fsanitize=thread")
+    target_compile_options(gv_instrumentation_flags INTERFACE -fsanitize=thread -fno-omit-frame-pointer)
+    target_link_options(gv_instrumentation_flags INTERFACE -fsanitize=thread)
 elseif(ENABLE_SANITIZERS)
-    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fsanitize=address -fsanitize=undefined -fno-omit-frame-pointer")
-    set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -fsanitize=address -fsanitize=undefined")
+    target_compile_options(gv_instrumentation_flags INTERFACE -fsanitize=address -fsanitize=undefined -fno-omit-frame-pointer)
+    target_link_options(gv_instrumentation_flags INTERFACE -fsanitize=address -fsanitize=undefined)
 endif()
 
-# Coverage
 if(ENABLE_COVERAGE)
-    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} --coverage -O0")
-    set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} --coverage")
+    target_compile_options(gv_instrumentation_flags INTERFACE --coverage -O0)
+    target_link_options(gv_instrumentation_flags INTERFACE --coverage)
 endif()
+
+# Propagate instrumentation flags to GigaVector and all targets that link it.
+target_link_libraries(GigaVector PUBLIC gv_instrumentation_flags)
 
 # Tests
 if(BUILD_TESTS)
@@ -259,6 +266,18 @@ if(BUILD_TESTS)
         endif()
         add_test(NAME ${TEST_NAME} COMMAND test_${TEST_NAME})
     endforeach()
+
+    # Shell-based tests (skip gracefully when prerequisites are absent)
+    find_program(BASH_EXECUTABLE bash)
+    if(BASH_EXECUTABLE AND NOT WIN32)
+        add_test(NAME corrupt_wal
+            COMMAND ${BASH_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/corrupt_wal.sh)
+        set_tests_properties(corrupt_wal PROPERTIES SKIP_RETURN_CODE 77)
+
+        add_test(NAME corrupt_snapshot
+            COMMAND ${BASH_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/corrupt_snapshot.sh)
+        set_tests_properties(corrupt_snapshot PROPERTIES SKIP_RETURN_CODE 77)
+    endif()
 endif()
 
 # Benchmarks

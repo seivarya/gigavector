@@ -457,6 +457,18 @@ int db_search_filtered(const GV_Database *db, const float *query_data, size_t k,
                           const char *filter_key, const char *filter_value);
 
 /**
+ * @brief Free search results returned by any db_search* function.
+ *
+ * Releases the GV_Vector (including its data and metadata) pointed to by each
+ * result entry. Safe to call when results[i].vector is NULL. The caller is
+ * still responsible for freeing the results array itself.
+ *
+ * @param results Array of search results; may be NULL.
+ * @param count   Number of entries in the array.
+ */
+void gv_search_results_free(GV_SearchResult *results, size_t count);
+
+/**
  * @brief Range search: find all vectors within a distance threshold.
  *
  * @param db Database to search; must be non-NULL.
@@ -519,15 +531,6 @@ int db_search_ivfpq_opts(const GV_Database *db, const float *query_data, size_t 
  * @param count Number of vectors.
  * @param dimension Vector dimensionality (must match db->dimension).
  * @return 0 on success, -1 on error (no partial rollback).
- */
-/**
- * @brief Add an item.
- *
- * @param db Database instance.
- * @param data Input data buffer.
- * @param count Number of items.
- * @param dimension Vector dimensionality.
- * @return 0 on success, -1 on error.
  */
 int db_add_vectors(GV_Database *db, const float *data, size_t count, size_t dimension);
 
@@ -920,13 +923,6 @@ int db_export_json(const GV_Database *db, const char *filepath);
  * @return Number of vectors imported, or -1 on error.
  */
 int db_import_json(GV_Database *db, const char *filepath);
-
-/**
- * @brief Free memory allocated by GigaVector (e.g. strings from to_json).
- *
- * @param ptr Pointer to free (safe to call with NULL).
- */
-void free(void *ptr);
 
 #ifdef __cplusplus
 }

@@ -7,6 +7,8 @@
 #include "features/json.h"
 #include "storage/database.h"
 #include "core/types.h"
+#include "schema/vector.h"
+#include "search/filter.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -598,10 +600,39 @@ GV_HttpResponse *rest_handle_search(const GV_HandlerContext *ctx,
     /* Check for filter */
     GV_JsonValue *filter = json_object_get(body, "filter");
     if (filter && json_is_object(filter) && json_object_length(filter) > 0) {
+        size_t nfilter = json_object_length(filter);
         GV_JsonEntry *entries = filter->data.object.entries;
-        found = db_search_filtered(ctx->db, query, k, results, distance,
-                                       entries[0].key,
-                                       json_get_string(entries[0].value));
+        if (nfilter == 1) {
+            found = db_search_filtered(ctx->db, query, k, results, distance,
+                                           entries[0].key,
+                                           json_get_string(entries[0].value));
+        } else {
+            /* Build "key == "val" AND key2 == "val2" ..." expression */
+            char expr[2048];
+            size_t pos = 0;
+            for (size_t fi = 0; fi < nfilter && pos < sizeof(expr) - 1; fi++) {
+                const char *val = json_get_string(entries[fi].value);
+                if (!val) continue;
+                /* Escape backslashes and quotes in val before interpolation */
+                char safe_val[256];
+                size_t sv = 0;
+                for (size_t vi = 0; val[vi] && sv + 2 < sizeof(safe_val); vi++) {
+                    if (val[vi] == '"' || val[vi] == '\\') safe_val[sv++] = '\\';
+                    safe_val[sv++] = val[vi];
+                }
+                safe_val[sv] = '\0';
+                int n = snprintf(expr + pos, sizeof(expr) - pos,
+                                 "%s%s == \"%s\"",
+                                 fi > 0 ? " AND " : "",
+                                 entries[fi].key, safe_val);
+                if (n > 0) {
+                    size_t written = (size_t)n;
+                    pos += written < sizeof(expr) - pos ? written : sizeof(expr) - pos - 1;
+                }
+            }
+            expr[pos] = '\0';
+            found = db_search_with_filter_expr(ctx->db, query, k, results, distance, expr);
+        }
     } else {
         found = db_search(ctx->db, query, k, results, distance);
     }
@@ -646,6 +677,9 @@ GV_HttpResponse *rest_handle_search(const GV_HandlerContext *ctx,
         json_array_push(results_arr, result_obj);
     }
 
+    for (int i = 0; i < found; i++) {
+        if (results[i].vector) vector_destroy((GV_Vector *)results[i].vector);
+    }
     free(results);
 
     json_object_set(response, "results", results_arr);
@@ -750,9 +784,29 @@ GV_HttpResponse *rest_handle_search_range(const GV_HandlerContext *ctx,
     for (int i = 0; i < found; i++) {
         GV_JsonValue *result_obj = json_object();
         json_object_set(result_obj, "distance", json_number(results[i].distance));
+
+        if (results[i].vector) {
+            GV_JsonValue *data_arr = json_array();
+            for (size_t j = 0; j < ctx->db->dimension; j++) {
+                json_array_push(data_arr, json_number((double)results[i].vector->data[j]));
+            }
+            json_object_set(result_obj, "data", data_arr);
+
+            GV_JsonValue *meta_obj = json_object();
+            GV_Metadata *meta = results[i].vector->metadata;
+            while (meta) {
+                json_object_set(meta_obj, meta->key, json_string(meta->value));
+                meta = meta->next;
+            }
+            json_object_set(result_obj, "metadata", meta_obj);
+        }
+
         json_array_push(results_arr, result_obj);
     }
 
+    for (int i = 0; i < found; i++) {
+        if (results[i].vector) vector_destroy((GV_Vector *)results[i].vector);
+    }
     free(results);
 
     json_object_set(response, "results", results_arr);
@@ -789,6 +843,11 @@ GV_HttpResponse *rest_handle_search_batch(const GV_HandlerContext *ctx,
         json_free(body);
         return rest_response_error(GV_HTTP_400_BAD_REQUEST, "invalid_request",
                                        "Empty queries array");
+    }
+    if (qcount > 10000) {
+        json_free(body);
+        return rest_response_error(GV_HTTP_400_BAD_REQUEST, "invalid_request",
+                                       "Batch query count exceeds maximum of 10000");
     }
 
     /* Parse k */

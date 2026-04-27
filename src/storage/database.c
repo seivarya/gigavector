@@ -161,24 +161,6 @@ static int read_uint32(FILE *in, uint32_t *value) {
     return (value != NULL && fread(value, sizeof(uint32_t), 1, in) == 1) ? 0 : -1;
 }
 
-static uint32_t crc32_init(void) {
-    return 0xFFFFFFFFu;
-}
-
-static uint32_t crc32_update(uint32_t crc, const void *data, size_t len) {
-    const uint8_t *p = (const uint8_t *)data;
-    for (size_t i = 0; i < len; ++i) {
-        crc ^= p[i];
-        for (int k = 0; k < 8; ++k) {
-            crc = (crc >> 1) ^ (0xEDB88320u & (0u - (crc & 1u)));
-        }
-    }
-    return crc;
-}
-
-static uint32_t crc32_finish(uint32_t crc) {
-    return crc ^ 0xFFFFFFFFu;
-}
 
 static char *db_build_wal_path(const char *filepath) {
     if (filepath == NULL) {
@@ -190,13 +172,33 @@ static char *db_build_wal_path(const char *filepath) {
     basename = (basename == NULL) ? filepath : basename + 1;
 
     char buf[1024];
+    int written;
     if (dir_override != NULL && dir_override[0] != '\0') {
-        snprintf(buf, sizeof(buf), "%s/%s.wal", dir_override, basename);
+        written = snprintf(buf, sizeof(buf), "%s/%s.wal", dir_override, basename);
     } else {
-        snprintf(buf, sizeof(buf), "%s.wal", filepath);
+        written = snprintf(buf, sizeof(buf), "%s.wal", filepath);
+    }
+    if (written < 0 || (size_t)written >= sizeof(buf)) {
+        return NULL;
     }
 
     return gv_dup_cstr(buf);
+}
+
+static int db_wal_apply_delete(void *ctx, size_t vector_index) {
+    GV_Database *db = (GV_Database *)ctx;
+    if (db == NULL) return -1;
+    return db_delete_vector_by_index(db, vector_index);
+}
+
+static int db_wal_apply_update(void *ctx, size_t vector_index, const float *data,
+                                size_t dimension,
+                                const char *const *metadata_keys, const char *const *metadata_values,
+                                size_t metadata_count) {
+    GV_Database *db = (GV_Database *)ctx;
+    if (db == NULL || data == NULL || dimension != db->dimension) return -1;
+    (void)metadata_keys; (void)metadata_values; (void)metadata_count;
+    return db_update_vector(db, vector_index, data, dimension);
 }
 
 static int db_wal_apply_rich(void *ctx, const float *data, size_t dimension,
@@ -698,7 +700,7 @@ GV_Database *db_open(const char *filepath, size_t dimension, GV_IndexType index_
         if (fseek(in, 0, SEEK_SET) != 0) {
             goto load_fail;
         }
-        uint32_t crc = crc32_init();
+        uint32_t crc = gv_crc32_init();
         char buf[65536];
         long remaining = end_pos - (long)sizeof(uint32_t);
         while (remaining > 0) {
@@ -706,10 +708,10 @@ GV_Database *db_open(const char *filepath, size_t dimension, GV_IndexType index_
             if (fread(buf, 1, chunk, in) != chunk) {
                 goto load_fail;
             }
-            crc = crc32_update(crc, buf, chunk);
+            crc = gv_crc32_update(crc, buf, chunk);
             remaining -= (long)chunk;
         }
-        crc = crc32_finish(crc);
+        crc = gv_crc32_finish(crc);
         if (crc != stored_crc) {
             goto load_fail;
         }
@@ -750,7 +752,9 @@ GV_Database *db_open(const char *filepath, size_t dimension, GV_IndexType index_
         }
 
         db->wal_replaying = 1;
-        if (wal_replay_rich(db->wal_path, db->dimension, db_wal_apply_rich, db, (uint32_t)db->index_type) != 0) {
+        if (wal_replay_rich(db->wal_path, db->dimension, db_wal_apply_rich,
+                            db_wal_apply_delete, db_wal_apply_update,
+                            db, (uint32_t)db->index_type) != 0) {
             db->wal_replaying = 0;
             wal_close(db->wal);
             db->wal = NULL;
@@ -1151,7 +1155,7 @@ GV_Database *db_open_from_memory(const void *data, size_t size,
             free(db);
             return NULL;
         }
-        uint32_t crc = crc32_init();
+        uint32_t crc = gv_crc32_init();
         char buf[65536];
         long remaining = end_pos - (long)sizeof(uint32_t);
         while (remaining > 0) {
@@ -1170,10 +1174,10 @@ GV_Database *db_open_from_memory(const void *data, size_t size,
                 free(db);
                 return NULL;
             }
-            crc = crc32_update(crc, buf, chunk);
+            crc = gv_crc32_update(crc, buf, chunk);
             remaining -= (long)chunk;
         }
-        crc = crc32_finish(crc);
+        crc = gv_crc32_finish(crc);
         if (crc != stored_crc) {
             fclose(in);
             if (db->index_type == GV_INDEX_TYPE_KDTREE) {
@@ -2428,18 +2432,18 @@ int db_save(const GV_Database *db, const char *filepath) {
         if (rf == NULL) {
             status = -1;
         } else {
-            uint32_t crc = crc32_init();
+            uint32_t crc = gv_crc32_init();
             char buf[65536];
             size_t nread = 0;
             while ((nread = fread(buf, 1, sizeof(buf), rf)) > 0) {
-                crc = crc32_update(crc, buf, nread);
+                crc = gv_crc32_update(crc, buf, nread);
             }
             if (ferror(rf)) {
                 status = -1;
             }
             fclose(rf);
             if (status == 0) {
-                crc = crc32_finish(crc);
+                crc = gv_crc32_finish(crc);
                 FILE *af = fopen(out_path, "ab");
                 if (af == NULL || write_uint32(af, crc) != 0 || fclose(af) != 0) {
                     status = -1;
@@ -2646,6 +2650,16 @@ int db_search_batch(const GV_Database *db, const float *queries, size_t qcount, 
 
     pthread_rwlock_unlock((pthread_rwlock_t *)&db->rwlock);
     return (int)(qcount * k);
+}
+
+void gv_search_results_free(GV_SearchResult *results, size_t count) {
+    if (!results) return;
+    for (size_t i = 0; i < count; i++) {
+        if (results[i].vector) {
+            vector_destroy((GV_Vector *)results[i].vector);
+            results[i].vector = NULL;
+        }
+    }
 }
 
 int db_search_filtered(const GV_Database *db, const float *query_data, size_t k,
