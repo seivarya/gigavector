@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.15)
-project(GigaVector VERSION 0.8.17 LANGUAGES C)
+project(GigaVector VERSION 0.8.18 LANGUAGES C)
 
 # Install directory conventions
 include(GNUInstallDirs)
