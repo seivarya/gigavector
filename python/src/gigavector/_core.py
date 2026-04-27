@@ -2740,7 +2740,7 @@ def serve_with_dashboard(db: Database, port: int = 6969, **kwargs: Any) -> "Dash
 
     No C HTTP library (libmicrohttpd) is required.
     """
-    from gigavector.dashboard.server import DashboardServer
+    from gigavector.dashboard.backend.server import DashboardServer
     server = DashboardServer(db, port=port, **kwargs)
     server.start()
     return server
