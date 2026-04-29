@@ -392,7 +392,9 @@ GV_StreamConsumer *stream_create(GV_Database *db, const GV_StreamConfig *config)
         consumer->config.kafka.brokers && consumer->config.kafka.topic) {
         char errstr[512];
         rd_kafka_conf_t *conf = rd_kafka_conf_new();
-
+        if (!conf) {
+            goto kafka_setup_done;
+        }
         rd_kafka_conf_set(conf, "bootstrap.servers",
                           consumer->config.kafka.brokers, errstr, sizeof(errstr));
 
@@ -453,6 +455,7 @@ GV_StreamConsumer *stream_create(GV_Database *db, const GV_StreamConfig *config)
             }
         }
     }
+kafka_setup_done:
 #endif /* HAVE_RDKAFKA */
 
     return consumer;
