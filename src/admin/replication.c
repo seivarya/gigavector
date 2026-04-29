@@ -158,15 +158,26 @@ static void *replication_thread_func(void *arg) {
                         mgr->leader_id = NULL;
                         free(mgr->voted_for);
                         mgr->voted_for = mgr->node_id ? gv_dup_cstr(mgr->node_id) : NULL;
-
-                        /* Note: In a real implementation, this would:
-                         * 1. Request votes from all known replicas
-                         * 2. Wait for majority response
-                         * 3. If majority votes received, become leader
-                         * 4. If another leader is discovered, become follower
-                         * 5. If election times out, restart election with new term */
                     }
                 }
+            }
+        } else if (mgr->role == GV_REPL_CANDIDATE) {
+            /* Count in-process registered follower DBs as automatic votes: they
+             * are co-located and can trivially accept this node as leader.
+             * Remote-only replicas (follower_dbs[i] == NULL) cannot be asked
+             * without a wire protocol, so they are not counted. */
+            size_t votes = 1; /* self-vote */
+            for (size_t i = 0; i < mgr->replica_count; i++) {
+                if (mgr->follower_dbs[i] != NULL) {
+                    votes++;
+                }
+            }
+            size_t quorum = (mgr->replica_count + 1) / 2 + 1;
+            if (votes >= quorum) {
+                mgr->role = GV_REPL_LEADER;
+                free(mgr->leader_id);
+                mgr->leader_id = mgr->node_id ? gv_dup_cstr(mgr->node_id) : NULL;
+                replication_embedded_followers_catch_up_locked(mgr);
             }
         }
 
@@ -333,22 +344,25 @@ int replication_request_leadership(GV_ReplicationManager *mgr) {
     free(mgr->voted_for);
     mgr->voted_for = gv_dup_cstr(mgr->node_id);
 
-    /* In a real implementation, we would:
-     * 1. Send RequestVote to all replicas
-     * 2. Wait for majority
-     * 3. Become leader if we win
-     */
-
-    if (mgr->replica_count == 0) {
+    size_t votes = 1;
+    for (size_t i = 0; i < mgr->replica_count; i++) {
+        if (mgr->follower_dbs[i] != NULL) {
+            votes++;
+        }
+    }
+    size_t quorum = (mgr->replica_count + 1) / 2 + 1;
+    if (votes >= quorum) {
         mgr->role = GV_REPL_LEADER;
         free(mgr->leader_id);
         mgr->leader_id = gv_dup_cstr(mgr->node_id);
+        replication_embedded_followers_catch_up_locked(mgr);
     }
 
+    GV_ReplicationRole result_role = mgr->role;
     pthread_rwlock_unlock(&mgr->rwlock);
     pthread_mutex_unlock(&mgr->election_mutex);
 
-    return mgr->role == GV_REPL_LEADER ? 0 : -1;
+    return result_role == GV_REPL_LEADER ? 0 : -1;
 }
 
 int replication_add_follower(GV_ReplicationManager *mgr, const char *node_id,
