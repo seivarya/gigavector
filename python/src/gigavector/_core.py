@@ -33,6 +33,8 @@ class IndexType(IntEnum):
     IVFFLAT = 5
     PQ = 6
     LSH = 7
+    IVFSQ8 = 8
+    IVFTURBOQUANT = 9
 
 
 class DistanceType(IntEnum):
@@ -107,6 +109,45 @@ class IVFFlatConfig:
     nprobe: int = 4
     train_iters: int = 15
     use_cosine: bool = False
+
+
+@dataclass
+class IVFSQ8Config:
+    nlist: int = 64
+    nprobe: int = 4
+    train_iters: int = 15
+    use_cosine: bool = False
+    per_dimension: bool = False
+    default_rerank: int = 200
+
+
+class TurboQuantRotation(IntEnum):
+    AUTO = 0
+    FHWT = 1
+    QR = 2
+
+
+@dataclass
+class TurboQuantConfig:
+    bits: int = 8
+    projections: int = 0
+    seed: int = 42
+    use_qjl: bool = True
+    rotation: TurboQuantRotation = TurboQuantRotation.AUTO
+
+
+@dataclass
+class IVFTurboQuantConfig:
+    nlist: int = 64
+    nprobe: int = 4
+    train_iters: int = 15
+    use_cosine: bool = False
+    default_rerank: int = 200
+    turbo: TurboQuantConfig | None = None
+
+    def __post_init__(self) -> None:
+        if self.turbo is None:
+            self.turbo = TurboQuantConfig()
 
 
 @dataclass
@@ -220,8 +261,9 @@ class Database:
     @classmethod
     def open(cls, path: str | None, dimension: int, index: IndexType = IndexType.KDTREE,
              hnsw_config: HNSWConfig | None = None, ivfpq_config: IVFPQConfig | None = None,
-             ivfflat_config: IVFFlatConfig | None = None, pq_config: PQConfig | None = None,
-             lsh_config: LSHConfig | None = None) -> Database:
+             ivfflat_config: IVFFlatConfig | None = None, ivfsq8_config: IVFSQ8Config | None = None,
+             ivfturboquant_config: IVFTurboQuantConfig | None = None,
+             pq_config: PQConfig | None = None, lsh_config: LSHConfig | None = None) -> Database:
         """
         Open a database instance.
 
@@ -232,6 +274,8 @@ class Database:
             hnsw_config: Optional HNSW configuration. Only used when index is HNSW.
             ivfpq_config: Optional IVFPQ configuration. Only used when index is IVFPQ.
             ivfflat_config: Optional IVF-Flat configuration. Only used when index is IVFFLAT.
+            ivfsq8_config: Optional IVF-SQ8 configuration. Only used when index is IVFSQ8.
+            ivfturboquant_config: Optional IVF-TurboQuant configuration. Only used when index is IVFTURBOQUANT.
             pq_config: Optional PQ configuration. Only used when index is PQ.
             lsh_config: Optional LSH configuration. Only used when index is LSH.
 
@@ -280,6 +324,35 @@ class Database:
                 "use_cosine": 1 if ivfflat_config.use_cosine else 0,
             })
             db = lib.gv_db_open_with_ivfflat_config(c_path, dimension, int(index), config)
+        elif ivfsq8_config is not None and index == IndexType.IVFSQ8:
+            config = ffi.new("GV_IVFSQ8Config *", {
+                "nlist": ivfsq8_config.nlist,
+                "nprobe": ivfsq8_config.nprobe,
+                "train_iters": ivfsq8_config.train_iters,
+                "use_cosine": 1 if ivfsq8_config.use_cosine else 0,
+                "per_dimension": 1 if ivfsq8_config.per_dimension else 0,
+                "default_rerank": ivfsq8_config.default_rerank,
+            })
+            db = lib.gv_db_open_with_ivfsq8_config(c_path, dimension, int(index), config)
+        elif ivfturboquant_config is not None and index == IndexType.IVFTURBOQUANT:
+            turbo = ivfturboquant_config.turbo or TurboQuantConfig()
+            projections = turbo.projections if turbo.projections > 0 else max(dimension // 4, 2)
+            turbo_cfg = ffi.new("GV_TurboQuantConfig *", {
+                "bits": turbo.bits,
+                "projections": projections,
+                "seed": turbo.seed,
+                "use_qjl": 1 if turbo.use_qjl else 0,
+                "rotation": int(turbo.rotation),
+            })
+            config = ffi.new("GV_IVFTurboQuantConfig *", {
+                "nlist": ivfturboquant_config.nlist,
+                "nprobe": ivfturboquant_config.nprobe,
+                "train_iters": ivfturboquant_config.train_iters,
+                "use_cosine": 1 if ivfturboquant_config.use_cosine else 0,
+                "default_rerank": ivfturboquant_config.default_rerank,
+                "turbo": turbo_cfg[0],
+            })
+            db = lib.gv_db_open_with_ivfturboquant_config(c_path, dimension, int(index), config)
         elif pq_config is not None and index == IndexType.PQ:
             config = ffi.new("GV_PQConfig *", {
                 "m": pq_config.m,
@@ -437,6 +510,14 @@ class Database:
     def train_ivfflat(self, data: Sequence[Sequence[float]]) -> None:
         """Train IVF-Flat index with provided vectors (only for IVFFLAT index)."""
         self._train_index(data, lib.gv_db_ivfflat_train)
+
+    def train_ivfsq8(self, data: Sequence[Sequence[float]]) -> None:
+        """Train IVF-SQ8 index with provided vectors (only for IVFSQ8 index)."""
+        self._train_index(data, lib.gv_db_ivfsq8_train)
+
+    def train_ivfturboquant(self, data: Sequence[Sequence[float]]) -> None:
+        """Train IVF-TurboQuant index with provided vectors (only for IVFTURBOQUANT index)."""
+        self._train_index(data, lib.gv_db_ivfturboquant_train)
 
     def train_pq(self, data: Sequence[Sequence[float]]) -> None:
         """Train PQ index with provided vectors (only for PQ index)."""

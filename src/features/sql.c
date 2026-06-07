@@ -1523,6 +1523,8 @@ int sql_explain(GV_SQLEngine *eng, const char *query, char *plan, size_t plan_si
     case GV_INDEX_TYPE_SPARSE:  index_name = "SPARSE";   break;
     case GV_INDEX_TYPE_FLAT:    index_name = "FLAT";     break;
     case GV_INDEX_TYPE_IVFFLAT: index_name = "IVFFLAT"; break;
+    case GV_INDEX_TYPE_IVFSQ8:  index_name = "IVFSQ8";  break;
+    case GV_INDEX_TYPE_IVFTURBOQUANT: index_name = "IVFTURBOQUANT"; break;
     case GV_INDEX_TYPE_PQ:      index_name = "PQ";       break;
     case GV_INDEX_TYPE_LSH:     index_name = "LSH";      break;
     default:                    index_name = "UNKNOWN";  break;

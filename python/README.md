@@ -15,7 +15,7 @@ A high-performance vector database library for Python. GigaVector provides effic
 ## Features
 
 **Core Database:**
-- Multiple index types: KD-tree, HNSW, and IVFPQ
+- Index types: KD-tree, HNSW, Flat, IVF-PQ, IVF-Flat, IVF-SQ8, IVF-TurboQuant, PQ, LSH, Sparse
 - Distance metrics: Euclidean and Cosine similarity
 - Rich metadata support with key-value pairs
 - Metadata filtering in search queries
@@ -76,7 +76,7 @@ with Database.open(None, dimension=128, index=IndexType.HNSW) as db:
 
 The main class for vector database operations.
 
-#### `Database.open(path, dimension, index=IndexType.KDTREE)`
+#### `Database.open(path, dimension, index=IndexType.KDTREE, ...)`
 
 Create or open a database instance.
 
@@ -84,6 +84,13 @@ Create or open a database instance.
 - `path` (str | None): File path for persistent storage. Use `None` for in-memory database.
 - `dimension` (int): Vector dimension (must be consistent for all vectors).
 - `index` (IndexType): Index type to use. Defaults to `IndexType.KDTREE`.
+- `hnsw_config` (HNSWConfig | None): Used when `index=IndexType.HNSW`.
+- `ivfpq_config` (IVFPQConfig | None): Used when `index=IndexType.IVFPQ`.
+- `ivfflat_config` (IVFFlatConfig | None): Used when `index=IndexType.IVFFLAT`.
+- `ivfsq8_config` (IVFSQ8Config | None): Used when `index=IndexType.IVFSQ8`.
+- `ivfturboquant_config` (IVFTurboQuantConfig | None): Used when `index=IndexType.IVFTURBOQUANT`.
+- `pq_config` (PQConfig | None): Used when `index=IndexType.PQ`.
+- `lsh_config` (LSHConfig | None): Used when `index=IndexType.LSH`.
 
 **Returns:** `Database` instance
 
@@ -222,7 +229,7 @@ db.save("backup.db")
 
 #### `train_ivfpq(data)`
 
-Train the IVFPQ index with training vectors. Only applicable when using `IndexType.IVFPQ`.
+Train the IVF-PQ index. Required before insert when using `IndexType.IVFPQ`.
 
 **Parameters:**
 - `data` (Sequence[Sequence[float]]): Training vectors. All vectors must match the database dimension.
@@ -233,10 +240,25 @@ Train the IVFPQ index with training vectors. Only applicable when using `IndexTy
 
 **Example:**
 ```python
-# Train with at least 256 vectors (recommended)
 train_data = [[(i % 10) / 10.0 for _ in range(128)] for i in range(256)]
 db.train_ivfpq(train_data)
 ```
+
+#### `train_ivfflat(data)`
+
+Train the IVF-Flat index. Required before insert when using `IndexType.IVFFLAT`.
+
+#### `train_ivfsq8(data)`
+
+Train the IVF-SQ8 index (coarse centroids + scalar quantizer). Required before insert when using `IndexType.IVFSQ8`.
+
+#### `train_ivfturboquant(data)`
+
+Train the IVF-TurboQuant index (IVF centroids only; TurboQuant needs no codebook training). Required before insert when using `IndexType.IVFTURBOQUANT`. Vector dimension must be even.
+
+#### `train_pq(data)`
+
+Train the PQ index. Required before insert when using `IndexType.PQ`.
 
 #### `close()`
 
@@ -251,11 +273,31 @@ db.close()
 
 ### IndexType
 
-Enumeration of available index types.
+- `IndexType.KDTREE` — exact search, low/medium dimension
+- `IndexType.HNSW` — approximate graph index
+- `IndexType.IVFPQ` — IVF + product quantization; requires training
+- `IndexType.SPARSE` — sparse vectors
+- `IndexType.FLAT` — brute-force exact search
+- `IndexType.IVFFLAT` — IVF with full float vectors in lists; requires training
+- `IndexType.PQ` — product quantization; requires training
+- `IndexType.LSH` — locality-sensitive hashing
+- `IndexType.IVFSQ8` — IVF with 8-bit scalar-quantized vectors in lists; requires training
+- `IndexType.IVFTURBOQUANT` — IVF with TurboQuant (PolarQuant + optional QJL) in lists; requires training; even dimension
 
-- `IndexType.KDTREE`: KD-tree index. Good for low to medium dimensional data.
-- `IndexType.HNSW`: Hierarchical Navigable Small World graph. Good for high-dimensional data with fast approximate search.
-- `IndexType.IVFPQ`: Inverted File with Product Quantization. Memory-efficient for large-scale datasets. Requires training before use.
+### Index config dataclasses
+
+Pass the matching config to `Database.open()` for the chosen index type.
+
+- `HNSWConfig` — `M`, `ef_construction`, `ef_search`, ...
+- `IVFPQConfig` — `nlist`, `m`, `nbits`, `nprobe`, `default_rerank`, ...
+- `IVFFlatConfig` — `nlist`, `nprobe`, `train_iters`, `use_cosine`
+- `IVFSQ8Config` — `nlist`, `nprobe`, `train_iters`, `use_cosine`, `per_dimension`, `default_rerank`
+- `IVFTurboQuantConfig` — `nlist`, `nprobe`, `train_iters`, `use_cosine`, `default_rerank`, `turbo` (`TurboQuantConfig`)
+- `TurboQuantConfig` — `bits`, `projections`, `seed`, `use_qjl`, `rotation` (`TurboQuantRotation`: AUTO, FHWT, QR)
+- `PQConfig` — `m`, `nbits`, `train_iters`
+- `LSHConfig` — `num_tables`, `num_hash_bits`, `seed`, `bucket_width`
+
+Per-query `nprobe` for IVF-Flat, IVF-SQ8, and IVF-TurboQuant: `db.search_with_params(query, k, params=SearchParams(nprobe=16))`.
 
 ### DistanceType
 
@@ -324,6 +366,44 @@ with db:
     # Search
     query = [random.random() for _ in range(64)]
     hits = db.search(query, k=10, distance=DistanceType.EUCLIDEAN)
+```
+
+### IVF-Flat with Training
+
+```python
+from gigavector import Database, IndexType, IVFFlatConfig, DistanceType
+
+cfg = IVFFlatConfig(nlist=64, nprobe=4)
+db = Database.open(None, dimension=64, index=IndexType.IVFFLAT, ivfflat_config=cfg)
+db.train_ivfflat(train_data)  # at least nlist vectors
+# ... add vectors, search ...
+```
+
+### IVF-SQ8 with Training
+
+```python
+from gigavector import Database, IndexType, IVFSQ8Config, DistanceType
+
+cfg = IVFSQ8Config(nlist=64, nprobe=4, default_rerank=200)
+db = Database.open(None, dimension=64, index=IndexType.IVFSQ8, ivfsq8_config=cfg)
+db.train_ivfsq8(train_data)  # at least nlist vectors
+# ... add vectors, search ...
+```
+
+### IVF-TurboQuant with Training
+
+```python
+from gigavector import Database, IndexType, IVFTurboQuantConfig, TurboQuantConfig, DistanceType
+
+cfg = IVFTurboQuantConfig(
+    nlist=64,
+    nprobe=4,
+    default_rerank=200,
+    turbo=TurboQuantConfig(bits=8, projections=16, use_qjl=True),
+)
+db = Database.open(None, dimension=64, index=IndexType.IVFTURBOQUANT, ivfturboquant_config=cfg)
+db.train_ivfturboquant(train_data)  # at least nlist vectors; dimension must be even
+# ... add vectors, search ...
 ```
 
 ### Metadata Filtering

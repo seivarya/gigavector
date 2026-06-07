@@ -137,6 +137,20 @@ GV_Database *gv_db_open_with_ivfflat_config(const char *filepath,
   return db_open_with_ivfflat_config(filepath, dimension, index_type, config);
 }
 
+GV_Database *gv_db_open_with_ivfsq8_config(const char *filepath,
+                                           size_t dimension,
+                                           GV_IndexType index_type,
+                                           const GV_IVFSQ8Config *config) {
+  return db_open_with_ivfsq8_config(filepath, dimension, index_type, config);
+}
+
+GV_Database *gv_db_open_with_ivfturboquant_config(const char *filepath,
+                                                  size_t dimension,
+                                                  GV_IndexType index_type,
+                                                  const GV_IVFTurboQuantConfig *config) {
+  return db_open_with_ivfturboquant_config(filepath, dimension, index_type, config);
+}
+
 GV_Database *gv_db_open_with_pq_config(const char *filepath, size_t dimension,
                                        GV_IndexType index_type,
                                        const GV_PQConfig *config) {
@@ -195,6 +209,16 @@ int gv_db_update_vector_metadata(GV_Database *db, size_t vector_index,
 int gv_db_ivfflat_train(GV_Database *db, const float *data, size_t count,
                         size_t dimension) {
   return db_ivfflat_train(db, data, count, dimension);
+}
+
+int gv_db_ivfsq8_train(GV_Database *db, const float *data, size_t count,
+                       size_t dimension) {
+  return db_ivfsq8_train(db, data, count, dimension);
+}
+
+int gv_db_ivfturboquant_train(GV_Database *db, const float *data, size_t count,
+                              size_t dimension) {
+  return db_ivfturboquant_train(db, data, count, dimension);
 }
 
 int gv_db_pq_train(GV_Database *db, const float *data, size_t count,

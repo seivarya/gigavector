@@ -17,7 +17,7 @@ ffi: FFIType = FFI()
 ffi.cdef(
     """
 typedef long long time_t;
-typedef enum { GV_INDEX_TYPE_KDTREE = 0, GV_INDEX_TYPE_HNSW = 1, GV_INDEX_TYPE_IVFPQ = 2, GV_INDEX_TYPE_SPARSE = 3, GV_INDEX_TYPE_FLAT = 4, GV_INDEX_TYPE_IVFFLAT = 5, GV_INDEX_TYPE_PQ = 6, GV_INDEX_TYPE_LSH = 7 } GV_IndexType;
+typedef enum { GV_INDEX_TYPE_KDTREE = 0, GV_INDEX_TYPE_HNSW = 1, GV_INDEX_TYPE_IVFPQ = 2, GV_INDEX_TYPE_SPARSE = 3, GV_INDEX_TYPE_FLAT = 4, GV_INDEX_TYPE_IVFFLAT = 5, GV_INDEX_TYPE_PQ = 6, GV_INDEX_TYPE_LSH = 7, GV_INDEX_TYPE_IVFSQ8 = 8, GV_INDEX_TYPE_IVFTURBOQUANT = 9 } GV_IndexType;
 typedef enum { GV_DISTANCE_EUCLIDEAN = 0, GV_DISTANCE_COSINE = 1, GV_DISTANCE_DOT_PRODUCT = 2, GV_DISTANCE_MANHATTAN = 3, GV_DISTANCE_HAMMING = 4 } GV_DistanceType;
 
 typedef struct {
@@ -68,6 +68,38 @@ typedef struct {
     size_t train_iters;
     int use_cosine;
 } GV_IVFFlatConfig;
+
+typedef struct {
+    size_t nlist;
+    size_t nprobe;
+    size_t train_iters;
+    int use_cosine;
+    int per_dimension;
+    size_t default_rerank;
+} GV_IVFSQ8Config;
+
+typedef enum {
+    GV_TURBOQUANT_ROTATION_AUTO = 0,
+    GV_TURBOQUANT_ROTATION_FHWT = 1,
+    GV_TURBOQUANT_ROTATION_QR = 2
+} GV_TurboQuantRotation;
+
+typedef struct {
+    uint8_t bits;
+    size_t projections;
+    uint64_t seed;
+    int use_qjl;
+    GV_TurboQuantRotation rotation;
+} GV_TurboQuantConfig;
+
+typedef struct {
+    size_t nlist;
+    size_t nprobe;
+    size_t train_iters;
+    int use_cosine;
+    size_t default_rerank;
+    GV_TurboQuantConfig turbo;
+} GV_IVFTurboQuantConfig;
 
 typedef struct {
     size_t m;
@@ -136,6 +168,8 @@ GV_Database *gv_db_open(const char *filepath, size_t dimension, GV_IndexType ind
 GV_Database *gv_db_open_with_hnsw_config(const char *filepath, size_t dimension, GV_IndexType index_type, const GV_HNSWConfig *hnsw_config);
 GV_Database *gv_db_open_with_ivfpq_config(const char *filepath, size_t dimension, GV_IndexType index_type, const GV_IVFPQConfig *ivfpq_config);
 GV_Database *gv_db_open_with_ivfflat_config(const char *filepath, size_t dimension, GV_IndexType index_type, const GV_IVFFlatConfig *config);
+GV_Database *gv_db_open_with_ivfsq8_config(const char *filepath, size_t dimension, GV_IndexType index_type, const GV_IVFSQ8Config *config);
+GV_Database *gv_db_open_with_ivfturboquant_config(const char *filepath, size_t dimension, GV_IndexType index_type, const GV_IVFTurboQuantConfig *config);
 GV_Database *gv_db_open_with_pq_config(const char *filepath, size_t dimension, GV_IndexType index_type, const GV_PQConfig *config);
 GV_Database *gv_db_open_with_lsh_config(const char *filepath, size_t dimension, GV_IndexType index_type, const GV_LSHConfig *config);
 GV_Database *gv_db_open_from_memory(const void *data, size_t size,
@@ -160,6 +194,8 @@ int gv_db_update_vector_metadata(GV_Database *db, size_t vector_index,
 int gv_db_save(const GV_Database *db, const char *filepath);
 int gv_db_ivfpq_train(GV_Database *db, const float *data, size_t count, size_t dimension);
 int gv_db_ivfflat_train(GV_Database *db, const float *data, size_t count, size_t dimension);
+int gv_db_ivfsq8_train(GV_Database *db, const float *data, size_t count, size_t dimension);
+int gv_db_ivfturboquant_train(GV_Database *db, const float *data, size_t count, size_t dimension);
 int gv_db_pq_train(GV_Database *db, const float *data, size_t count, size_t dimension);
 int gv_db_add_vectors(GV_Database *db, const float *data, size_t count, size_t dimension);
 int gv_db_add_vectors_with_metadata(GV_Database *db, const float *data,
@@ -3097,10 +3133,10 @@ def _load_lib() -> "FFIType.CData":
     candidate_paths = []
     for name in lib_names:
         candidate_paths.extend([
-            repo_root / "build" / name,
             repo_root / "build" / "lib" / name,
-            repo_root / "build-cmake" / name,
+            repo_root / "build" / name,
             repo_root / "build-cmake" / "Release" / name,
+            repo_root / "build-cmake" / name,
             here / name,
         ])
 

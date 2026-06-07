@@ -16,7 +16,7 @@
 
 ## Feature Overview
 
-### Index Algorithms (8 types)
+### Index Algorithms (10 types)
 
 | Index | Type | Training | Best For |
 |-------|------|----------|----------|
@@ -24,6 +24,8 @@
 | **HNSW** | Approximate | No | General-purpose, high recall |
 | **IVF-PQ** | Approximate | Yes | Large-scale, memory-efficient |
 | **IVF-Flat** | Approximate | Yes | Large-scale, higher accuracy than IVF-PQ |
+| **IVF-SQ8** | Approximate | Yes | Large-scale IVF with 8-bit scalar quant per dimension |
+| **IVF-TurboQuant** | Approximate | Yes | Large-scale IVF with PolarQuant (+ optional QJL); no codebook training |
 | **Flat** | Exact (brute-force) | No | Small datasets, baseline/ground-truth |
 | **PQ** | Approximate | Yes | Compressed-domain search |
 | **LSH** | Approximate | No | Fast hash-based approximate search |
@@ -38,6 +40,8 @@
 | General purpose, high recall | HNSW |
 | > 500k vectors, memory-constrained | IVF-PQ |
 | > 500k vectors, higher accuracy | IVF-Flat |
+| > 500k vectors, IVF structure with less RAM than IVF-Flat | IVF-SQ8 |
+| > 500k vectors, training-free quant in IVF lists (even dimension) | IVF-TurboQuant |
 | Compressed-domain search | PQ |
 | Fast approximate, no training | LSH |
 | Sparse/NLP data | Sparse |
@@ -52,7 +56,7 @@ Euclidean, Cosine, Dot Product, Manhattan, Hamming -- all with SIMD-optimized im
 - **Range search** -- find all vectors within a radius
 - **Batch search** -- multiple queries in one call
 - **Filtered search** -- metadata-based pre/post filtering
-- **Dynamic search params** -- per-query ef_search, nprobe, rerank tuning
+- **Dynamic search params** -- per-query ef_search, nprobe (HNSW, IVF-Flat, IVF-SQ8, IVF-TurboQuant), rerank tuning
 - **Hybrid search** -- combine vector similarity with BM25 full-text ranking (RRF, weighted, Borda fusion)
 - **Scroll/pagination** -- iterate over stored vectors with offset/limit
 - **Score threshold filtering** -- return only results above a distance/similarity cutoff
@@ -68,6 +72,8 @@ Euclidean, Cosine, Dot Product, Manhattan, Hamming -- all with SIMD-optimized im
 - **Learned sparse index** -- SPLADE-style token-weighted inverted index with WAND acceleration
 - **Full-text search** -- Porter stemming, multilingual (6 languages), BlockMax WAND, phrase matching
 - **IVF-PQ per-query tuning** -- nprobe and rerank overrides on individual search calls
+- **IVF-SQ8** -- inverted lists with 8-bit scalar-quantized vectors; optional exact rerank of top-N via `default_rerank`
+- **IVF-TurboQuant** -- inverted lists with PolarQuant (+ optional QJL residual sketch); IVF centroids trained via k-means only
 - **Exact search control** -- configurable threshold to fall back to brute-force; force exact search mode
 - **Cosine normalization** -- automatic L2 normalization of stored vectors for cosine distance optimization
 - **Index suggestion** -- heuristic-based `gv_index_suggest()` recommends optimal index for your workload
@@ -112,7 +118,8 @@ Euclidean, Cosine, Dot Product, Manhattan, Hamming -- all with SIMD-optimized im
 
 ### Quantization and Compression
 - **Product Quantization (PQ)** -- codebook-based compression
-- **Scalar Quantization** -- configurable bit-width reduction
+- **Scalar Quantization** -- configurable bit-width reduction; used by IVF-SQ8 (8-bit per dimension in inverted lists)
+- **TurboQuant** -- PolarQuant rotation-based compression with optional QJL; used by IVF-TurboQuant (requires even dimension)
 - **Binary Quantization** -- 1-bit compression for HNSW
 - **Codebook sharing** -- train once, share PQ codebooks across collections
 - **Advanced quantization** -- 1.5-bit (ternary), 2-bit, 4-bit, 8-bit; RaBitQ with Householder rotations; symmetric/asymmetric modes
@@ -189,6 +196,8 @@ make lib        # static + shared libraries -> build/lib/
 make c-test     # run all C tests
 make python-test # run Python test suite
 ```
+
+After changing C code, run `make lib` before using the Python bindings from a local build. Python loads `build/libGigaVector.so`, which must match `build/lib/libGigaVector.so`.
 
 ### CMake
 ```bash
@@ -267,6 +276,20 @@ from gigavector import IVFFlatConfig
 db = Database.open(None, dimension=128, index=IndexType.IVFFLAT,
                    ivfflat_config=IVFFlatConfig(nlist=64, nprobe=8))
 db.train_ivfflat(training_vectors)
+
+# IVF-SQ8 (requires training; 8-bit scalar quant in inverted lists)
+from gigavector import IVFSQ8Config
+db = Database.open(None, dimension=128, index=IndexType.IVFSQ8,
+                   ivfsq8_config=IVFSQ8Config(nlist=64, nprobe=8, default_rerank=200))
+db.train_ivfsq8(training_vectors)
+
+# IVF-TurboQuant (requires training for IVF centroids only; even dimension)
+from gigavector import IVFTurboQuantConfig, TurboQuantConfig
+db = Database.open(None, dimension=128, index=IndexType.IVFTURBOQUANT,
+                   ivfturboquant_config=IVFTurboQuantConfig(
+                       nlist=64, nprobe=8, default_rerank=200,
+                       turbo=TurboQuantConfig(bits=8, projections=32, use_qjl=True)))
+db.train_ivfturboquant(training_vectors)
 
 # LSH (no training needed)
 from gigavector import LSHConfig
