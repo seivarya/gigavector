@@ -998,6 +998,23 @@ Combines BM25 text ranking with vector similarity for improved relevance. A quer
 
 ---
 
+## Larger-than-RAM and Dual-Mode Policy
+
+GigaVector distinguishes **fast in-memory** indexes from **large on-disk** indexes when the working set exceeds available RAM.
+
+| Concern | In-memory (HNSW, IVF-*) | On-disk (DiskANN, IVFDisk) |
+|---------|-------------------------|----------------------------|
+| Primary structure | Graph / inverted lists in RAM | Centroid head in RAM + vectors on disk |
+| Durability | WAL + optional snapshot | WAL + segment catalog + head checkpoint |
+| Visibility | Insert → index + WAL fsync → searchable | Same invariant; posting append is append-only |
+| Selection API | `index_suggest()` | `index_suggest_with_budget(dim, count, ram_bytes, 0)` |
+
+**IVFDisk** (Phase 2) combines an in-memory IVF/HNSW head with Phase 1 posting lists per partition. **DiskANN** stores the Vamana graph and vectors on disk with an LRU page cache (`src/index/diskann.c`).
+
+RAM-aware selection returns `GV_INDEX_TYPE_IVFDISK` or `GV_INDEX_TYPE_DISKANN` when estimated dataset size exceeds 70% of the caller's memory budget. See [performance.md](performance.md#dual-mode-index-selection-in-memory-vs-on-disk) and [larger_than_ram_plan.md](larger_than_ram_plan.md).
+
+---
+
 ## Distributed Architecture
 
 **Files**: `gv_shard.h/c`, `gv_cluster.h/c`, `gv_replication.h/c`

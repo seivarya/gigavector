@@ -1,35 +1,52 @@
-# API Keys
+# API Keys Required
 
-## All Keys
+GigaVector integrates with external LLM and embedding providers. API keys are passed in code/config at runtime — environment variables are used by tests and optional dashboard fallbacks.
 
-| Key | Purpose | Required? | Format | Where to Get It |
-|-----|---------|-----------|--------|-----------------|
-| `OPENAI_API_KEY` | OpenAI LLM and embeddings | **Required** for tests | `sk-...` | https://platform.openai.com/api-keys |
-| `ANTHROPIC_API_KEY` | Anthropic/Claude LLM | **Required** for tests | `sk-ant-...` | https://console.anthropic.com/settings/keys |
-| `GOOGLE_API_KEY` | Google embeddings (default model: `text-embedding-004`, dim 768) | Optional | No specific prefix | https://aistudio.google.com |
-| Azure OpenAI `api_key` + `base_url` | Azure OpenAI LLM | Optional, set in config (not env vars) | 32+ alphanumeric chars | Azure Portal |
-| Custom provider `api_key` + `base_url` | OpenAI-compatible APIs (Groq, Together AI, etc.) | Optional, set in config (not env vars) | Varies | Provider dashboard |
-| *(none)* | HuggingFace local embeddings (`all-MiniLM-L6-v2`, etc.) | Free, no key needed | N/A | N/A |
+## Environment Variables
 
-## .env Template
-
-Create a `.env` file in the project root:
+Copy `.env.example` to `.env` and fill in your keys:
 
 ```bash
-# Required
-OPENAI_API_KEY=sk-your-openai-api-key-here
-ANTHROPIC_API_KEY=sk-ant-your-anthropic-api-key-here
-
-# Optional
-GOOGLE_API_KEY=your-google-api-key-here
-
-# Azure OpenAI and custom providers use base_url + api_key in code/config,
-# not environment variables.
+cp .env.example .env
 ```
 
-## Security Notes
+| Variable | Required for | Used by |
+|----------|--------------|---------|
+| `OPENAI_API_KEY` | OpenAI LLM/embedding tests | `test_llm.c`, `test_memory_llm.c`, `test_embedding.c` |
+| `ANTHROPIC_API_KEY` | Anthropic LLM tests | `test_llm.c` |
+| `GOOGLE_API_KEY` | Google embedding + Gemini LLM tests | `test_embedding.c`, `test_llm.c`, `test_auto_embed.c`, `test_inference.c` |
+| `GEMINI_API_KEY` | Legacy alias for `GOOGLE_API_KEY` | Same tests (fallback) |
+| `GV_WAL_DIR` | Optional WAL override | Database WAL location |
 
-1. **Never commit `.env` files** -- ensure `.env` is in `.gitignore`.
-2. **Use environment variables** in production, not `.env` files.
-3. **Rotate keys regularly** and use separate keys for dev vs. production.
-4. **Restrict API key permissions** when possible.
+## Google / Gemini
+
+Get a key from [Google AI Studio](https://aistudio.google.com).
+
+| Use case | Provider | Default model | Default dimension |
+|----------|----------|---------------|-------------------|
+| Embeddings | `EmbeddingProvider.GOOGLE` / `AutoEmbedProvider.GOOGLE` | `text-embedding-004` | 768 |
+| LLM chat | `LLMProvider.GOOGLE` | `gemini-2.5-flash` | — |
+| Inference | `embed_provider="google"` | `text-embedding-004` | 768 |
+| Agents | `llm_provider="google"` | `gemini-2.5-flash` | — |
+
+### Python example
+
+```python
+import os
+from gigavector import AutoEmbedConfig, AutoEmbedProvider, AutoEmbedder
+
+embedder = AutoEmbedder(AutoEmbedConfig(
+    provider=AutoEmbedProvider.GOOGLE,
+    api_key=os.environ["GOOGLE_API_KEY"],
+    model_name="text-embedding-004",
+    dimension=768,
+))
+```
+
+## Azure OpenAI and Custom Providers
+
+Azure OpenAI and custom OpenAI-compatible endpoints require `base_url` and `api_key` in code/config — not environment variables.
+
+## CI
+
+GitHub Actions CI does not set provider API keys. Live API tests are skipped automatically when keys are absent.

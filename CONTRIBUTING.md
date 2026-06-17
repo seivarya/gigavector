@@ -194,6 +194,15 @@ int gv_db_search(const GV_Database *db, ...);
 
 ## Testing
 
+### Fuzzing and DST
+
+See [docs/FUZZING.md](docs/FUZZING.md) for libFuzzer targets and deterministic simulation tests.
+
+```bash
+make fuzz-corpus && make fuzz-run   # requires clang
+GV_DST_SEED=42 make c-test-single TEST=dst/test_repl_oracle
+```
+
 ### Writing Tests
 
 **Test Structure:**

@@ -63,6 +63,7 @@ nav:
   - Getting Started:
       - Usage Guide: usage.md
       - Build & Test: build_and_test.md
+      - Agent & Memory Primitives: agents.md
       - API Keys: api_keys_required.md
   - Guides:
       - Python Bindings: python_bindings.md

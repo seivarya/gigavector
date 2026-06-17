@@ -41,12 +41,13 @@
 | > 500k vectors, memory-constrained | IVF-PQ |
 | > 500k vectors, higher accuracy | IVF-Flat |
 | > 500k vectors, IVF structure with less RAM than IVF-Flat | IVF-SQ8 |
+| > 500k vectors, IVF structure with less RAM than IVF-Flat | IVF-SQ8 |
 | > 500k vectors, training-free quant in IVF lists (even dimension) | IVF-TurboQuant |
 | Compressed-domain search | PQ |
 | Fast approximate, no training | LSH |
 | Sparse/NLP data | Sparse |
 
-Or use `suggest_index()` / `gv_index_suggest()` for automatic selection.
+Or use `suggest_index()` / `gv_index_suggest()` for automatic selection. Pass `max_memory_bytes` to prefer on-disk **DiskANN** or **IVFDisk** when the dataset exceeds ~70% of RAM (see [larger_than_ram_plan.md](docs/larger_than_ram_plan.md)).
 
 ### Distance Metrics (5 types)
 Euclidean, Cosine, Dot Product, Manhattan, Hamming -- all with SIMD-optimized implementations (SSE4.2, AVX2, AVX-512F, FMA).
@@ -72,6 +73,8 @@ Euclidean, Cosine, Dot Product, Manhattan, Hamming -- all with SIMD-optimized im
 - **Learned sparse index** -- SPLADE-style token-weighted inverted index with WAND acceleration
 - **Full-text search** -- Porter stemming, multilingual (6 languages), BlockMax WAND, phrase matching
 - **IVF-PQ per-query tuning** -- nprobe and rerank overrides on individual search calls
+- **IVF-SQ8** -- inverted lists with 8-bit scalar-quantized vectors; optional exact rerank of top-N via `default_rerank`
+- **IVF-TurboQuant** -- inverted lists with PolarQuant (+ optional QJL residual sketch); IVF centroids trained via k-means only
 - **IVF-SQ8** -- inverted lists with 8-bit scalar-quantized vectors; optional exact rerank of top-N via `default_rerank`
 - **IVF-TurboQuant** -- inverted lists with PolarQuant (+ optional QJL residual sketch); IVF centroids trained via k-means only
 - **Exact search control** -- configurable threshold to fall back to brute-force; force exact search mode
@@ -119,6 +122,7 @@ Euclidean, Cosine, Dot Product, Manhattan, Hamming -- all with SIMD-optimized im
 ### Quantization and Compression
 - **Product Quantization (PQ)** -- codebook-based compression
 - **Scalar Quantization** -- configurable bit-width reduction; used by IVF-SQ8 (8-bit per dimension in inverted lists)
+- **TurboQuant** -- PolarQuant rotation-based compression with optional QJL; used by IVF-TurboQuant (requires even dimension); used by IVF-SQ8 (8-bit per dimension in inverted lists)
 - **TurboQuant** -- PolarQuant rotation-based compression with optional QJL; used by IVF-TurboQuant (requires even dimension)
 - **Binary Quantization** -- 1-bit compression for HNSW
 - **Codebook sharing** -- train once, share PQ codebooks across collections
@@ -161,7 +165,7 @@ Euclidean, Cosine, Dot Product, Manhattan, Hamming -- all with SIMD-optimized im
 - **Graph persistence** -- binary save/load for both graph DB ("GVGR") and knowledge graph ("GVKG")
 
 ### AI Integration
-- **LLM support** -- OpenAI, Anthropic, Google Gemini (chat completions, streaming)
+- **LLM support** -- OpenAI, Anthropic, Google Gemini (chat completions)
 - **Embedding services** -- OpenAI, Google, HuggingFace embedding APIs with caching
 - **Auto-embedding** -- server-side text-to-vector with configurable providers and batching
 - **Semantic memory layer** -- extract, store, consolidate memories from conversations
@@ -196,6 +200,8 @@ make lib        # static + shared libraries -> build/lib/
 make c-test     # run all C tests
 make python-test # run Python test suite
 ```
+
+After changing C code, run `make lib` before using the Python bindings from a local build. Python loads `build/libGigaVector.so`, which must match `build/lib/libGigaVector.so`.
 
 After changing C code, run `make lib` before using the Python bindings from a local build. Python loads `build/libGigaVector.so`, which must match `build/lib/libGigaVector.so`.
 
@@ -520,6 +526,26 @@ kg.save("knowledge.gvkg")
 kg2 = KnowledgeGraph.load("knowledge.gvkg")
 ```
 
+### IVFDisk (on-disk IVF)
+
+Train and search billion-scale collections with on-disk inverted lists:
+
+```python
+from gigavector import Database, IndexType, IVFDiskConfig
+
+cfg = IVFDiskConfig(nlist=1024, nprobe=64)
+db = Database.open("data.gvdb", dimension=128, index=IndexType.IVFDISK, ivfdisk_config=cfg)
+db.train_ivfdisk(train_vectors)
+db.add_vector(vector)
+hits = db.search(query, k=10)
+```
+
+### Memory links and shard migration
+
+Typed memory links (`SUPPORTS`, `CONTRADICTS`, etc.) and temporal `valid_from`/`valid_to` metadata are available on `MemoryLayer`. Shard migration copies vectors with metadata via `ShardManager.migrate_vectors()`.
+
+Replication uses TCP WAL transport when `ReplicationManager.start()` is called with `listen_address` / `leader_address`; `repl_transport_set_hooks()` supports fault-injection testing.
+
 ### JSON Import/Export
 ```python
 db.export_json("vectors.ndjson")
@@ -600,7 +626,7 @@ cp .env.example .env   # copy and edit with your keys
 |----------|----------|-------------|
 | `OPENAI_API_KEY` | For LLM/embedding tests | OpenAI API key |
 | `ANTHROPIC_API_KEY` | For Anthropic tests | Anthropic/Claude API key |
-| `GOOGLE_API_KEY` | Optional | Google Gemini/embeddings |
+| `GOOGLE_API_KEY` | Optional | Google Gemini LLM and embeddings (`GEMINI_API_KEY` alias accepted) |
 | `GV_WAL_DIR` | Optional | Override WAL directory |
 
 ---

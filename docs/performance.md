@@ -371,3 +371,45 @@ With proper tuning and SIMD optimizations:
 7. **Balance trade-offs:** Optimize for your specific accuracy/speed/memory requirements
 
 For specific tuning questions, refer to the API documentation or run benchmarks with your data to find optimal parameters.
+
+## Dual-Mode Index Selection (In-Memory vs On-Disk)
+
+GigaVector supports two deployment modes for vector search. Use `index_suggest_with_budget()` / Python `suggest_index(..., max_memory_bytes=...)` to pick automatically.
+
+| Mode | Index types | When to use | Query latency | Recall | RAM | Insert cost |
+|------|-------------|-------------|---------------|--------|-----|-------------|
+| **Fast (in-memory)** | HNSW, IVFPQ, IVFFlat, Flat, KD-Tree | Dataset fits in ~70% of RAM budget | Sub-ms to low-ms | High (tunable) | Holds full index + vectors | Low–medium |
+| **Large (on-disk)** | **IVFDisk** (Phase 2), **DiskANN** | Dataset exceeds RAM; mmap/static serve | Bounded by cache + list size | Good with nprobe/ef tuning | Head + page cache only | Append-first (posting lists) |
+| **Read-only serve** | Any via `db_open_mmap()` | Static snapshots, edge replicas | Fast cold start | Same as snapshot index | OS page cache | N/A (read-only) |
+
+**Rules of thumb**
+
+- Estimate bytes/vector as `dimension × 4 + 64` metadata overhead (or pass `bytes_per_vector` explicitly).
+- If `expected_count × bytes_per_vector > 0.7 × max_memory_bytes` → prefer **IVFDisk** (partition + disk posting lists) or **DiskANN** (graph-on-disk for very large high-D datasets).
+- **HNSW**: best default for in-memory general ANN.
+- **IVFPQ / IVFSQ8**: in-memory compression when RAM is tight but data still fits.
+- **DiskANN**: graph traversal on SSD; strong for billion-scale when graph quality matters.
+- **IVFDisk**: SPANN-style IVF head + sequential disk lists; strong for filtered/partitioned larger-than-RAM workloads.
+
+### IVFDisk tuning
+
+| Knob | Default | Effect |
+|------|---------|--------|
+| `nlist` | 64–1024 | More lists → smaller posting lists, more head RAM |
+| `nprobe` | 4–64 | Higher → better recall, more disk reads per query |
+| `cache_size_mb` | 64–128 | LRU for posting segments; raise if p99 latency spikes |
+| `head_ratio` | 0.2 | Train rejects if centroid RAM exceeds ratio × cache budget |
+| `border_ratio` | 1.15 | Replicate border vectors to 2nd nearest list when d₂/d₁ ≤ ratio |
+| `max_list_bytes` | 64 MiB | Split trigger when a posting list exceeds cap (via `db_compact()` / background thread) |
+| `use_hnsw_head` | auto @ nlist≥256 | HNSW over centroids for fast head navigation |
+| `use_sq8` | off | SQ8 posting payloads save disk; lower recall vs float |
+
+**Read-only mmap:** `db_open_mmap(path, dim, GV_INDEX_TYPE_IVFDISK)` loads the snapshot via mmap and posting data from `{path}.ivfdisk/`.
+
+**Maintenance (Phase 3):** `db_compact()` runs `ivfdisk_maintenance_run()` — split (k-means, dynamic head growth), lite reassign, merge (stale versions), defrag (multi-segment heads). Head mutations are logged to `{data_dir}/head_wal.bin` and checkpointed to `head_checkpoint.bin`.
+
+**gRPC:** `GV_MSG_IVFDISK_TRAIN` (13) trains centroids on an IVFDisk database (payload: count, dimension, train vectors).
+
+**Benchmark:** `make bench-ivfdisk` (10k smoke, recall≥90%). Full 1M×128: `make bench-ivfdisk-full` (brute-force recall, 256MB cache; long runtime).
+
+See also: [larger_than_ram_plan.md](larger_than_ram_plan.md).
