@@ -31,8 +31,8 @@ typedef enum {
 /**
  * @brief Memory link/relationship type enumeration.
  *
- * Inspired by Cortex's evolution system - typed connections between memories
- * that help build a knowledge graph and improve retrieval.
+ * Typed connections between memories that help build a knowledge graph
+ * and improve retrieval.
  */
 typedef enum {
     GV_LINK_SIMILAR = 0,            /**< Memories are semantically similar. */
@@ -74,13 +74,15 @@ typedef struct {
     GV_MemoryLink *links;           /**< Array of typed memory links. */
     size_t link_count;              /**< Number of links. */
     int consolidated;               /**< 1 if consolidated, 0 otherwise. */
+    time_t valid_from;              /**< Fact valid from (0 = unset). */
+    time_t valid_to;                /**< Fact valid until (0 = unset). */
 } GV_MemoryMetadata;
 
 /**
  * @brief Search options for memory retrieval.
  *
  * Provides fine-grained control over search behavior including
- * temporal weighting inspired by Cortex's approach.
+ * temporal weighting of semantic vs. recency scores.
  */
 typedef struct {
     float temporal_weight;          /**< Blend factor: 0.0=semantic only, 1.0=recency only. */
@@ -91,6 +93,8 @@ typedef struct {
     time_t max_timestamp;           /**< Filter: maximum creation timestamp. */
     int memory_type;                /**< Filter: specific memory type (-1 = all). */
     const char *source;             /**< Filter: specific source (NULL = all). */
+    const size_t *candidate_vector_indices; /**< Optional vector index allow-list (NULL = all). */
+    size_t candidate_count;         /**< Length of candidate_vector_indices (0 = all). */
 } GV_MemorySearchOptions;
 
 /**
@@ -156,10 +160,21 @@ void memory_layer_destroy(GV_MemoryLayer *layer);
  * @param content Memory content text; must be non-NULL.
  * @param embedding Vector embedding for content; must match db dimension.
  * @param metadata Memory metadata; ownership transferred if non-NULL.
+ * @param out_vector_index Optional output: vector index assigned in the database.
  * @return Memory ID string (caller must free) or NULL on failure.
  */
 char *memory_add(GV_MemoryLayer *layer, const char *content, 
-                     const float *embedding, GV_MemoryMetadata *metadata);
+                     const float *embedding, GV_MemoryMetadata *metadata,
+                     size_t *out_vector_index);
+
+/**
+ * @brief Add a memory with optional context-graph ingest control.
+ *
+ * @param ingest_context When non-zero, extract entities into the context graph on add.
+ */
+char *memory_add_opts(GV_MemoryLayer *layer, const char *content,
+                          const float *embedding, GV_MemoryMetadata *metadata,
+                          size_t *out_vector_index, int ingest_context);
 
 /**
  * @brief Extract memories from conversation text.
@@ -222,7 +237,7 @@ int memory_search(GV_MemoryLayer *layer, const float *query_embedding,
  * @brief Search for memories with advanced options.
  *
  * Provides fine-grained control over search behavior including:
- * - temporal_weight: Blend semantic similarity with recency (Cortex-style)
+ * - temporal_weight: Blend semantic similarity with recency
  * - importance_weight: How much importance score affects ranking
  * - link_boost: Boost for memories connected to top results
  *
@@ -281,6 +296,18 @@ int memory_get_related(GV_MemoryLayer *layer, const char *memory_id,
  */
 int memory_get(GV_MemoryLayer *layer, const char *memory_id,
                    GV_MemoryResult *result);
+
+/**
+ * @brief Copy the stored embedding vector for a memory.
+ *
+ * @param layer Memory layer; must be non-NULL.
+ * @param memory_id Memory identifier; must be non-NULL.
+ * @param out_embedding Output buffer; must hold @p dimension floats.
+ * @param dimension Expected embedding dimension.
+ * @return 0 on success, -1 if not found, -2 on error.
+ */
+int memory_get_embedding(GV_MemoryLayer *layer, const char *memory_id,
+                             float *out_embedding, size_t dimension);
 
 /**
  * @brief Update a memory's content and metadata.
@@ -418,6 +445,29 @@ void memory_link_free(GV_MemoryLink *link);
 int memory_record_access(GV_MemoryLayer *layer,
                              const char *memory_id,
                              float relevance);
+
+/**
+ * @brief Extract entities from text, ingest into the layer context graph, return names.
+ *
+ * When context graph is disabled or extraction fails, returns 0 with an empty list.
+ *
+ * @param layer Memory layer; must be non-NULL.
+ * @param text Text to extract from; must be non-NULL.
+ * @param out_names Output array of allocated entity name strings; caller frees via
+ *                  memory_layer_free_context_entity_names().
+ * @param out_count Output number of names.
+ * @return 0 on success, -1 on error.
+ */
+int memory_layer_extract_context_entities(GV_MemoryLayer *layer, const char *text,
+                                          char ***out_names, size_t *out_count);
+
+/**
+ * @brief Free entity names returned by memory_layer_extract_context_entities().
+ *
+ * @param names Name array; safe to call with NULL.
+ * @param count Number of names.
+ */
+void memory_layer_free_context_entity_names(char **names, size_t count);
 
 #ifdef __cplusplus
 }

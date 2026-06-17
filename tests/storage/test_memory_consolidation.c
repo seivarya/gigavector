@@ -7,6 +7,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <math.h>
 
 #include "storage/database.h"
 #include "storage/memory_layer.h"
@@ -113,6 +114,17 @@ static int test_memory_merge(void) {
         int ret = memory_get(layer, merged_id, &result);
         if (ret == 0) {
             ASSERT(result.content != NULL, "merged memory should have content");
+            float merged_emb[DIM];
+            ASSERT(memory_get_embedding(layer, merged_id, merged_emb, DIM) == 0,
+                   "merged memory should have embedding");
+            int flat = 1;
+            for (size_t i = 0; i < DIM; i++) {
+                if (fabsf(merged_emb[i] - 0.5f) > 0.01f) {
+                    flat = 0;
+                    break;
+                }
+            }
+            ASSERT(!flat, "merged embedding should not be flat 0.5");
             memory_result_free(&result);
         }
         free(merged_id);

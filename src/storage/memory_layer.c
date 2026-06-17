@@ -13,11 +13,214 @@
 #include "search/importance.h"
 #include "schema/metadata.h"
 #include "storage/database.h"
+#include "storage/soa_storage.h"
 #include "multimodal/llm.h"
 #include "features/context_graph.h"
+#include "search/filter_ops.h"
 
 #define MEMORY_ID_PREFIX "mem_"
 #define MEMORY_ID_BUFFER_SIZE 64
+
+static int memory_find_vector_index(GV_Database *db, const char *memory_id,
+                                    size_t *out_index) {
+    if (db == NULL || memory_id == NULL || out_index == NULL) {
+        return -1;
+    }
+    size_t scratch[4];
+    char filter_expr[256];
+    snprintf(filter_expr, sizeof(filter_expr), "memory_id == \"%s\"", memory_id);
+    int n = db_find_by_filter(db, filter_expr, scratch, 4);
+    if (n <= 0 || db->soa_storage == NULL) {
+        return -1;
+    }
+    for (int i = 0; i < n; i++) {
+        if (scratch[i] < db->soa_storage->count &&
+            soa_storage_is_deleted(db->soa_storage, scratch[i]) == 0) {
+            *out_index = scratch[i];
+            return 0;
+        }
+    }
+    return -1;
+}
+
+static int memory_get_vector_by_id(GV_Database *db, const char *memory_id,
+                                   GV_Vector *out_vec, size_t *out_index) {
+    size_t idx;
+    if (memory_find_vector_index(db, memory_id, &idx) != 0) {
+        return -1;
+    }
+    if (db->soa_storage == NULL || soa_storage_is_deleted(db->soa_storage, idx) == 1) {
+        return -1;
+    }
+    if (soa_storage_get_vector_view(db->soa_storage, idx, out_vec) != 0) {
+        return -1;
+    }
+    if (out_index != NULL) {
+        *out_index = idx;
+    }
+    return 0;
+}
+
+static void memory_layer_free_extracted_entities(GV_GraphEntity *entities, size_t entity_count,
+                                                 GV_GraphRelationship *relationships,
+                                                 size_t relationship_count) {
+    if (entities != NULL) {
+        for (size_t i = 0; i < entity_count; i++) {
+            graph_entity_free(&entities[i]);
+        }
+        free(entities);
+    }
+    if (relationships != NULL) {
+        for (size_t i = 0; i < relationship_count; i++) {
+            graph_relationship_free(&relationships[i]);
+        }
+        free(relationships);
+    }
+}
+
+void memory_layer_free_context_entity_names(char **names, size_t count) {
+    if (names == NULL) {
+        return;
+    }
+    for (size_t i = 0; i < count; i++) {
+        free(names[i]);
+    }
+    free(names);
+}
+
+int memory_layer_extract_context_entities(GV_MemoryLayer *layer, const char *text,
+                                          char ***out_names, size_t *out_count) {
+    if (layer == NULL || text == NULL || out_names == NULL || out_count == NULL) {
+        return -1;
+    }
+
+    *out_names = NULL;
+    *out_count = 0;
+
+    if (!layer->config.enable_context_graph || layer->context_graph == NULL) {
+        return 0;
+    }
+
+    GV_GraphEntity *entities = NULL;
+    size_t entity_count = 0;
+    GV_GraphRelationship *relationships = NULL;
+    size_t relationship_count = 0;
+
+    if (context_graph_extract((GV_ContextGraph *)layer->context_graph, text,
+                              NULL, NULL, NULL,
+                              &entities, &entity_count,
+                              &relationships, &relationship_count) != 0) {
+        return 0;
+    }
+
+    if (entity_count > 0) {
+        context_graph_add_entities((GV_ContextGraph *)layer->context_graph,
+                                   entities, entity_count);
+    }
+    if (relationship_count > 0) {
+        context_graph_add_relationships((GV_ContextGraph *)layer->context_graph,
+                                        relationships, relationship_count);
+    }
+
+    if (entity_count == 0) {
+        memory_layer_free_extracted_entities(entities, entity_count,
+                                             relationships, relationship_count);
+        return 0;
+    }
+
+    char **names = (char **)calloc(entity_count, sizeof(char *));
+    if (names == NULL) {
+        memory_layer_free_extracted_entities(entities, entity_count,
+                                             relationships, relationship_count);
+        return -1;
+    }
+
+    size_t name_count = 0;
+    for (size_t i = 0; i < entity_count; i++) {
+        if (entities[i].name != NULL && entities[i].name[0] != '\0') {
+            names[name_count] = gv_dup_cstr(entities[i].name);
+            if (names[name_count] == NULL) {
+                memory_layer_free_context_entity_names(names, name_count);
+                memory_layer_free_extracted_entities(entities, entity_count,
+                                                     relationships, relationship_count);
+                return -1;
+            }
+            name_count++;
+        }
+    }
+
+    memory_layer_free_extracted_entities(entities, entity_count,
+                                         relationships, relationship_count);
+
+    if (name_count == 0) {
+        free(names);
+        return 0;
+    }
+
+    *out_names = names;
+    *out_count = name_count;
+    return 0;
+}
+
+static GV_Metadata *memory_prepend_metadata(GV_Metadata *head, const char *key,
+                                            const char *value) {
+    GV_Metadata *m = (GV_Metadata *)malloc(sizeof(GV_Metadata));
+    if (m == NULL) {
+        return head;
+    }
+    m->key = gv_dup_cstr(key);
+    m->value = gv_dup_cstr(value);
+    if (m->key == NULL || m->value == NULL) {
+        free(m->key);
+        free(m->value);
+        free(m);
+        return head;
+    }
+    m->next = head;
+    return m;
+}
+
+static int memory_metadata_list_to_arrays(GV_Metadata *list, const char ***out_keys,
+                                          const char ***out_values, size_t *out_count) {
+    size_t n = 0;
+    for (GV_Metadata *m = list; m != NULL; m = m->next) {
+        n++;
+    }
+    if (n == 0) {
+        return -1;
+    }
+    const char **keys = (const char **)malloc(n * sizeof(char *));
+    const char **values = (const char **)malloc(n * sizeof(char *));
+    if (keys == NULL || values == NULL) {
+        free(keys);
+        free(values);
+        return -1;
+    }
+    size_t i = 0;
+    for (GV_Metadata *m = list; m != NULL; m = m->next) {
+        keys[i] = m->key;
+        values[i] = m->value;
+        i++;
+    }
+    *out_keys = keys;
+    *out_values = values;
+    *out_count = n;
+    return 0;
+}
+
+static int memory_vector_index_allowed(size_t vector_index,
+                                       const GV_MemorySearchOptions *opts) {
+    if (opts == NULL || opts->candidate_count == 0 ||
+        opts->candidate_vector_indices == NULL) {
+        return 1;
+    }
+    for (size_t i = 0; i < opts->candidate_count; i++) {
+        if (opts->candidate_vector_indices[i] == vector_index) {
+            return 1;
+        }
+    }
+    return 0;
+}
 
 static char *generate_memory_id(uint64_t counter) {
     char *id = (char *)malloc(MEMORY_ID_BUFFER_SIZE);
@@ -380,10 +583,16 @@ static GV_Metadata *create_memory_metadata(const GV_MemoryMetadata *meta) {
         }
     }
 
-    /* Serialize memory links */
-    if (meta->link_count > 0 && meta->links != NULL) {
+    /* Serialize memory links (always persist key so removals clear stored links) */
+    {
         char *links_str = NULL;
-        if (serialize_links(meta->links, meta->link_count, &links_str) == 0 && links_str) {
+        if (meta->link_count > 0 && meta->links != NULL) {
+            serialize_links(meta->links, meta->link_count, &links_str);
+        }
+        if (links_str == NULL) {
+            links_str = gv_dup_cstr("[]");
+        }
+        if (links_str != NULL) {
             m = (GV_Metadata *)malloc(sizeof(GV_Metadata));
             if (m == NULL) {
                 free(links_str);
@@ -395,6 +604,54 @@ static GV_Metadata *create_memory_metadata(const GV_MemoryMetadata *meta) {
             tail->next = m;
             tail = m;
         }
+    }
+
+    if (meta->valid_from > 0) {
+        char valid_from_str[64];
+        snprintf(valid_from_str, sizeof(valid_from_str), "%ld", (long)meta->valid_from);
+        m = (GV_Metadata *)malloc(sizeof(GV_Metadata));
+        if (m == NULL) goto error;
+        m->key = gv_dup_cstr("valid_from");
+        m->value = gv_dup_cstr(valid_from_str);
+        m->next = NULL;
+        tail->next = m;
+        tail = m;
+    }
+
+    if (meta->valid_to > 0) {
+        char valid_to_str[64];
+        snprintf(valid_to_str, sizeof(valid_to_str), "%ld", (long)meta->valid_to);
+        m = (GV_Metadata *)malloc(sizeof(GV_Metadata));
+        if (m == NULL) goto error;
+        m->key = gv_dup_cstr("valid_to");
+        m->value = gv_dup_cstr(valid_to_str);
+        m->next = NULL;
+        tail->next = m;
+        tail = m;
+    }
+
+    if (meta->access_count > 0) {
+        char access_count_str[32];
+        snprintf(access_count_str, sizeof(access_count_str), "%u", meta->access_count);
+        m = (GV_Metadata *)malloc(sizeof(GV_Metadata));
+        if (m == NULL) goto error;
+        m->key = gv_dup_cstr("access_count");
+        m->value = gv_dup_cstr(access_count_str);
+        m->next = NULL;
+        tail->next = m;
+        tail = m;
+    }
+
+    if (meta->last_accessed > 0) {
+        char last_accessed_str[64];
+        snprintf(last_accessed_str, sizeof(last_accessed_str), "%ld", (long)meta->last_accessed);
+        m = (GV_Metadata *)malloc(sizeof(GV_Metadata));
+        if (m == NULL) goto error;
+        m->key = gv_dup_cstr("last_accessed");
+        m->value = gv_dup_cstr(last_accessed_str);
+        m->next = NULL;
+        tail->next = m;
+        tail = m;
     }
 
     return head;
@@ -431,6 +688,14 @@ static int parse_memory_metadata(const GV_Metadata *meta_list, GV_MemoryMetadata
             deserialize_related_ids(current->value, &out->related_memory_ids, &out->related_count);
         } else if (strcmp(current->key, "memory_links") == 0) {
             deserialize_links(current->value, &out->links, &out->link_count);
+        } else if (strcmp(current->key, "valid_from") == 0) {
+            out->valid_from = (time_t)atol(current->value);
+        } else if (strcmp(current->key, "valid_to") == 0) {
+            out->valid_to = (time_t)atol(current->value);
+        } else if (strcmp(current->key, "access_count") == 0) {
+            out->access_count = (uint32_t)strtoul(current->value, NULL, 10);
+        } else if (strcmp(current->key, "last_accessed") == 0) {
+            out->last_accessed = (time_t)atol(current->value);
         }
         current = current->next;
     }
@@ -480,9 +745,16 @@ GV_MemoryLayer *memory_layer_create(GV_Database *db, const GV_MemoryLayerConfig 
     }
     
     // Create context graph if enabled
-    if (layer->config.enable_context_graph && layer->config.context_graph_config != NULL) {
-        GV_ContextGraphConfig *graph_config = (GV_ContextGraphConfig *)layer->config.context_graph_config;
-        graph_config->llm = layer->llm;  // Share LLM instance
+    if (layer->config.enable_context_graph) {
+        GV_ContextGraphConfig default_graph_config;
+        GV_ContextGraphConfig *graph_config;
+        if (layer->config.context_graph_config != NULL) {
+            graph_config = (GV_ContextGraphConfig *)layer->config.context_graph_config;
+        } else {
+            default_graph_config = context_graph_config_default();
+            graph_config = &default_graph_config;
+        }
+        graph_config->llm = layer->llm;
         layer->context_graph = context_graph_create(graph_config);
     }
     
@@ -518,7 +790,14 @@ void memory_layer_destroy(GV_MemoryLayer *layer) {
 }
 
 char *memory_add(GV_MemoryLayer *layer, const char *content,
-                     const float *embedding, GV_MemoryMetadata *metadata) {
+                     const float *embedding, GV_MemoryMetadata *metadata,
+                     size_t *out_vector_index) {
+    return memory_add_opts(layer, content, embedding, metadata, out_vector_index, 1);
+}
+
+char *memory_add_opts(GV_MemoryLayer *layer, const char *content,
+                            const float *embedding, GV_MemoryMetadata *metadata,
+                            size_t *out_vector_index, int ingest_context) {
     if (layer == NULL || content == NULL || embedding == NULL) {
         return NULL;
     }
@@ -555,13 +834,31 @@ char *memory_add(GV_MemoryLayer *layer, const char *content,
         pthread_mutex_unlock(&layer->mutex);
         return NULL;
     }
-    
+
+    meta_list = memory_prepend_metadata(meta_list, "content", content);
+    if (meta_list == NULL || meta_list->key == NULL) {
+        metadata_free(meta_list);
+        free(memory_id);
+        pthread_mutex_unlock(&layer->mutex);
+        return NULL;
+    }
+
+    const char **keys = NULL;
+    const char **values = NULL;
+    size_t meta_count = 0;
+    if (memory_metadata_list_to_arrays(meta_list, &keys, &values, &meta_count) != 0) {
+        metadata_free(meta_list);
+        free(memory_id);
+        pthread_mutex_unlock(&layer->mutex);
+        return NULL;
+    }
+
+    size_t before_count = database_count(layer->db);
     int result = db_add_vector_with_rich_metadata(
         layer->db, embedding, layer->db->dimension,
-        (const char *const[]){ "content", "memory_id" },
-        (const char *const[]){ content, memory_id },
-        2
-    );
+        keys, values, meta_count);
+    free(keys);
+    free(values);
     
     if (result != 0) {
         metadata_free(meta_list);
@@ -569,7 +866,29 @@ char *memory_add(GV_MemoryLayer *layer, const char *content,
         pthread_mutex_unlock(&layer->mutex);
         return NULL;
     }
-    
+
+    if (out_vector_index != NULL) {
+        size_t after_count = database_count(layer->db);
+        if (after_count > before_count) {
+            *out_vector_index = after_count - 1;
+        } else {
+            *out_vector_index = before_count;
+        }
+    }
+
+    metadata_free(meta_list);
+
+    /* Optional context graph extraction on single-fact ingest */
+    if (ingest_context && layer->config.enable_context_graph && layer->context_graph != NULL) {
+        char **entity_names = NULL;
+        size_t entity_name_count = 0;
+        if (memory_layer_extract_context_entities(layer, content,
+                                                  &entity_names,
+                                                  &entity_name_count) == 0) {
+            memory_layer_free_context_entity_names(entity_names, entity_name_count);
+        }
+    }
+
     pthread_mutex_unlock(&layer->mutex);
     return memory_id;
 }
@@ -712,40 +1031,48 @@ int memory_get(GV_MemoryLayer *layer, const char *memory_id,
     if (layer == NULL || memory_id == NULL || result == NULL) {
         return -1;
     }
-    
-    GV_SearchResult search_result;
-    float dummy_query[layer->db->dimension];
-    memset(dummy_query, 0, sizeof(dummy_query));
-    
-    int count = db_search_filtered(layer->db, dummy_query, 1, &search_result,
-                                       GV_DISTANCE_EUCLIDEAN, "memory_id", memory_id);
-    if (count <= 0) {
+
+    GV_Vector vec;
+    if (memory_get_vector_by_id(layer->db, memory_id, &vec, NULL) != 0) {
         return -1;
     }
-    
-    const GV_Vector *vec = search_result.vector;
-    if (vec == NULL) {
-        return -2;
-    }
-    
-    result->distance = search_result.distance;
+
+    result->distance = 0.0f;
     result->relevance_score = 1.0f;
-    
-    const char *content = vector_get_metadata(vec, "content");
+
+    const char *content = vector_get_metadata(&vec, "content");
     if (content) {
         result->content = gv_dup_cstr(content);
     }
     result->memory_id = gv_dup_cstr(memory_id);
-    
+
     GV_MemoryMetadata *meta = (GV_MemoryMetadata *)malloc(sizeof(GV_MemoryMetadata));
     if (meta != NULL) {
-        parse_memory_metadata(vec->metadata, meta);
+        parse_memory_metadata(vec.metadata, meta);
         result->metadata = meta;
     }
-    
+
     result->related = NULL;
     result->related_count = 0;
-    
+
+    return 0;
+}
+
+int memory_get_embedding(GV_MemoryLayer *layer, const char *memory_id,
+                             float *out_embedding, size_t dimension) {
+    if (layer == NULL || memory_id == NULL || out_embedding == NULL || dimension == 0) {
+        return -2;
+    }
+
+    GV_Vector vec;
+    if (memory_get_vector_by_id(layer->db, memory_id, &vec, NULL) != 0) {
+        return -1;
+    }
+    if (vec.data == NULL || vec.dimension != dimension) {
+        return -2;
+    }
+
+    memcpy(out_embedding, vec.data, dimension * sizeof(float));
     return 0;
 }
 
@@ -753,18 +1080,16 @@ int memory_delete(GV_MemoryLayer *layer, const char *memory_id) {
     if (layer == NULL || memory_id == NULL) {
         return -1;
     }
-    
-    GV_SearchResult search_result;
-    float dummy_query[layer->db->dimension];
-    memset(dummy_query, 0, sizeof(dummy_query));
-    
-    int count = db_search_filtered(layer->db, dummy_query, 1, &search_result,
-                                       GV_DISTANCE_EUCLIDEAN, "memory_id", memory_id);
-    if (count <= 0) {
+
+    size_t vector_index;
+    if (memory_find_vector_index(layer->db, memory_id, &vector_index) != 0) {
         return -1;
     }
-    
-    return 0;
+
+    pthread_mutex_lock(&layer->mutex);
+    int rc = db_delete_vector_by_index(layer->db, vector_index);
+    pthread_mutex_unlock(&layer->mutex);
+    return rc;
 }
 
 void memory_result_free(GV_MemoryResult *result) {
@@ -904,7 +1229,7 @@ char **memory_extract_from_conversation(GV_MemoryLayer *layer,
         meta.consolidated = 0;
         
         char *mem_id = memory_add(layer, candidates[i].content,
-                                      &(*embeddings)[i * layer->db->dimension], &meta);
+                                      &(*embeddings)[i * layer->db->dimension], &meta, NULL);
         memory_ids[i] = mem_id;
         
         memory_metadata_free(&meta);
@@ -1128,32 +1453,37 @@ int memory_get_related(GV_MemoryLayer *layer, const char *memory_id,
 
 int memory_update(GV_MemoryLayer *layer, const char *memory_id,
                       const float *new_embedding, GV_MemoryMetadata *new_metadata) {
-    if (layer == NULL || memory_id == NULL) {
+    if (layer == NULL || memory_id == NULL || new_metadata == NULL) {
         return -1;
     }
-    
-    GV_SearchResult search_result;
-    float dummy_query[layer->db->dimension];
-    memset(dummy_query, 0, sizeof(dummy_query));
-    
-    int count = db_search_filtered(layer->db, dummy_query, 1, &search_result,
-                                       GV_DISTANCE_EUCLIDEAN, "memory_id", memory_id);
-    if (count <= 0) {
-        return -1;
-    }
-    
+
     if (new_embedding != NULL) {
         return -1;
     }
-    
-    if (new_metadata != NULL) {
-        GV_Metadata *meta_list = create_memory_metadata(new_metadata);
-        if (meta_list == NULL) {
-            return -1;
-        }
+
+    size_t vector_index;
+    if (memory_find_vector_index(layer->db, memory_id, &vector_index) != 0) {
+        return -1;
     }
 
-    return 0;
+    GV_Metadata *meta_list = create_memory_metadata(new_metadata);
+    if (meta_list == NULL) {
+        return -1;
+    }
+
+    const char **keys = NULL;
+    const char **values = NULL;
+    size_t meta_count = 0;
+    if (memory_metadata_list_to_arrays(meta_list, &keys, &values, &meta_count) != 0) {
+        metadata_free(meta_list);
+        return -1;
+    }
+
+    int result = db_update_vector_metadata(layer->db, vector_index, keys, values, meta_count);
+    free(keys);
+    free(values);
+    metadata_free(meta_list);
+    return result;
 }
 
 /* Search Options and Advanced Search */
@@ -1168,11 +1498,13 @@ GV_MemorySearchOptions memory_search_options_default(void) {
     options.max_timestamp = 0;
     options.memory_type = -1;            /* All types */
     options.source = NULL;
+    options.candidate_vector_indices = NULL;
+    options.candidate_count = 0;
     return options;
 }
 
 /**
- * @brief Apply Cortex-style temporal weighting to scores.
+ * @brief Apply exponential temporal weighting to scores.
  *
  * Formula: combined = semantic * (1 - temporal_weight) + recency * temporal_weight
  * Recency uses exponential decay: e^(-days/7) with ~5-day half-life
@@ -1186,7 +1518,7 @@ static float apply_temporal_blend(float semantic_score, time_t creation_time,
     double age_seconds = difftime(current_time, creation_time);
     double days_ago = age_seconds / (24.0 * 3600.0);
 
-    /* Exponential decay with ~5-day half-life (Cortex uses 7.0 divisor) */
+    /* Exponential decay with ~5-day half-life (7-day time constant) */
     double recency_score = exp(-days_ago / 7.0);
     if (recency_score < 0.0) recency_score = 0.0;
     if (recency_score > 1.0) recency_score = 1.0;
@@ -1281,9 +1613,30 @@ int memory_search_advanced(GV_MemoryLayer *layer, const float *query_embedding,
         if (vec == NULL || vec->metadata == NULL) {
             continue;
         }
+        if (!memory_vector_index_allowed(search_results[i].id, &opts)) {
+            continue;
+        }
 
         const char *timestamp_str = vector_get_metadata(vec, "timestamp");
         time_t creation_time = timestamp_str ? (time_t)atol(timestamp_str) : 0;
+
+        const char *valid_from_str = vector_get_metadata(vec, "valid_from");
+        const char *valid_to_str = vector_get_metadata(vec, "valid_to");
+        if (valid_from_str) {
+            time_t vf = (time_t)atol(valid_from_str);
+            if (opts.max_timestamp > 0 && vf > opts.max_timestamp) continue;
+            if (opts.min_timestamp > 0 && vf > 0 && opts.min_timestamp < vf &&
+                creation_time < vf) {
+                creation_time = vf;
+            }
+        }
+        if (valid_to_str) {
+            time_t vt = (time_t)atol(valid_to_str);
+            if (opts.min_timestamp > 0 && vt > 0 && vt < opts.min_timestamp) continue;
+            if (opts.max_timestamp > 0 && vt > 0 && vt < opts.max_timestamp) {
+                /* still valid within query window */
+            }
+        }
 
         /* Apply timestamp filter */
         if (opts.min_timestamp > 0 && creation_time < opts.min_timestamp) continue;
@@ -1293,7 +1646,7 @@ int memory_search_advanced(GV_MemoryLayer *layer, const float *query_embedding,
         float semantic_score = 1.0f - (search_results[i].distance / 2.0f);
         if (semantic_score < 0.0f) semantic_score = 0.0f;
 
-        /* Apply temporal blending (Cortex-style) */
+        /* Apply temporal blending of semantic and recency scores */
         float blended_score = apply_temporal_blend(semantic_score, creation_time,
                                                     current_time, opts.temporal_weight);
         temp_results[valid_count].relevance_score = blended_score;
@@ -1401,6 +1754,35 @@ int memory_search_advanced(GV_MemoryLayer *layer, const float *query_embedding,
         memset(&temp_results[src_idx], 0, sizeof(GV_MemoryResult));
     }
 
+    if (opts.include_linked && out_count < k) {
+        for (size_t i = 0; i < out_count && out_count < k; i++) {
+            if (results[i].memory_id == NULL) continue;
+            GV_MemoryResult linked[8];
+            int ln = memory_get_related(layer, results[i].memory_id,
+                                        k - out_count, linked);
+            if (ln <= 0) continue;
+            for (int j = 0; j < ln && out_count < k; j++) {
+                int dup = 0;
+                for (size_t m = 0; m < out_count; m++) {
+                    if (results[m].memory_id && linked[j].memory_id &&
+                        strcmp(results[m].memory_id, linked[j].memory_id) == 0) {
+                        dup = 1;
+                        break;
+                    }
+                }
+                if (dup) {
+                    memory_result_free(&linked[j]);
+                    continue;
+                }
+                linked[j].relevance_score = results[i].relevance_score + opts.link_boost;
+                if (linked[j].relevance_score > 1.0f) {
+                    linked[j].relevance_score = 1.0f;
+                }
+                results[out_count++] = linked[j];
+            }
+        }
+    }
+
     /* Free unused results */
     for (int i = 0; i < valid_count; i++) {
         if (temp_results[i].content != NULL || temp_results[i].memory_id != NULL) {
@@ -1419,7 +1801,7 @@ int memory_search_advanced(GV_MemoryLayer *layer, const float *query_embedding,
 
 /* Memory Link Management */
 
-/** Reciprocal strength multiplier (Cortex uses 0.9) */
+/** Reciprocal strength multiplier for bidirectional links */
 #define RECIPROCAL_STRENGTH_FACTOR 0.9f
 
 /** Minimum link strength */

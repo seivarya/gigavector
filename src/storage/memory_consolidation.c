@@ -1,6 +1,8 @@
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <math.h>
 #include "core/utils.h"
 
 #include "storage/memory_consolidation.h"
@@ -8,6 +10,71 @@
 #include "storage/database.h"
 #include "schema/metadata.h"
 #include "storage/soa_storage.h"
+
+static void l2_normalize(float *vector, size_t dimension) {
+    if (vector == NULL || dimension == 0) {
+        return;
+    }
+    double sum = 0.0;
+    for (size_t i = 0; i < dimension; i++) {
+        sum += (double)vector[i] * (double)vector[i];
+    }
+    if (sum <= 0.0) {
+        return;
+    }
+    float norm = (float)sqrt(sum);
+    for (size_t i = 0; i < dimension; i++) {
+        vector[i] /= norm;
+    }
+}
+
+static char *merge_provenance_source(const char *source_a, const char *source_b) {
+    const char *a = source_a ? source_a : "";
+    const char *b = source_b ? source_b : "";
+    int a_swap = strncmp(a, "swap:", 5) == 0;
+    int b_swap = strncmp(b, "swap:", 5) == 0;
+
+    if (a_swap && b_swap) {
+        size_t len = strlen(a) + strlen(b) + 2;
+        char *combined = (char *)malloc(len);
+        if (combined == NULL) {
+            return NULL;
+        }
+        snprintf(combined, len, "%s;%s", a, b);
+        return combined;
+    }
+    if (a_swap) {
+        return gv_dup_cstr(a);
+    }
+    if (b_swap) {
+        return gv_dup_cstr(b);
+    }
+    if (source_a && source_a[0] != '\0') {
+        return gv_dup_cstr(source_a);
+    }
+    if (source_b && source_b[0] != '\0') {
+        return gv_dup_cstr(source_b);
+    }
+    return gv_dup_cstr("merged");
+}
+
+static void copy_parent_links(GV_MemoryLayer *layer,
+                              const char *new_id,
+                              const GV_MemoryMetadata *meta,
+                              const char *skip_id) {
+    if (layer == NULL || new_id == NULL || meta == NULL || meta->links == NULL) {
+        return;
+    }
+
+    for (size_t i = 0; i < meta->link_count; i++) {
+        const char *target = meta->links[i].target_memory_id;
+        if (target == NULL || strcmp(target, skip_id) == 0) {
+            continue;
+        }
+        memory_link_create(layer, new_id, target, meta->links[i].link_type,
+                           meta->links[i].strength, meta->links[i].reason);
+    }
+}
 
 static float calculate_similarity_from_distance(float distance, GV_DistanceType dist_type) {
     switch (dist_type) {
@@ -176,19 +243,46 @@ char *memory_merge(GV_MemoryLayer *layer, const char *memory_id_1,
         pos += l;
     }
     merged_content[pos] = '\0';
-    
-    float *merged_embedding = (float *)malloc(layer->db->dimension * sizeof(float));
+
+    size_t dimension = layer->db->dimension;
+    float *merged_embedding = (float *)malloc(dimension * sizeof(float));
     if (merged_embedding == NULL) {
         free(merged_content);
         memory_result_free(&mem1);
         memory_result_free(&mem2);
         return NULL;
     }
-    
-    for (size_t i = 0; i < layer->db->dimension; i++) {
-        merged_embedding[i] = 0.5f;
+
+    float *emb1 = (float *)malloc(dimension * sizeof(float));
+    float *emb2 = (float *)malloc(dimension * sizeof(float));
+    if (emb1 == NULL || emb2 == NULL) {
+        free(emb1);
+        free(emb2);
+        free(merged_embedding);
+        free(merged_content);
+        memory_result_free(&mem1);
+        memory_result_free(&mem2);
+        return NULL;
     }
-    
+
+    if (memory_get_embedding(layer, memory_id_1, emb1, dimension) != 0 ||
+        memory_get_embedding(layer, memory_id_2, emb2, dimension) != 0) {
+        free(emb1);
+        free(emb2);
+        free(merged_embedding);
+        free(merged_content);
+        memory_result_free(&mem1);
+        memory_result_free(&mem2);
+        return NULL;
+    }
+
+    for (size_t i = 0; i < dimension; i++) {
+        merged_embedding[i] = 0.5f * (emb1[i] + emb2[i]);
+    }
+    l2_normalize(merged_embedding, dimension);
+    free(emb1);
+    free(emb2);
+
     GV_MemoryMetadata merged_meta;
     memset(&merged_meta, 0, sizeof(merged_meta));
     merged_meta.memory_type = mem1.metadata ? mem1.metadata->memory_type : GV_MEMORY_TYPE_FACT;
@@ -196,20 +290,28 @@ char *memory_merge(GV_MemoryLayer *layer, const char *memory_id_1,
         (mem1.metadata->importance_score + mem2.metadata->importance_score) / 2.0 : 0.5;
     merged_meta.timestamp = time(NULL);
     merged_meta.consolidated = 1;
-    
-    char *new_id = memory_add(layer, merged_content, merged_embedding, &merged_meta);
-    
+    merged_meta.source = merge_provenance_source(
+        mem1.metadata ? mem1.metadata->source : NULL,
+        mem2.metadata ? mem2.metadata->source : NULL);
+
+    char *new_id = memory_add(layer, merged_content, merged_embedding, &merged_meta, NULL);
+
+    free(merged_meta.source);
     free(merged_embedding);
     free(merged_content);
-    memory_result_free(&mem1);
-    memory_result_free(&mem2);
-    memory_metadata_free(&merged_meta);
-    
+
     if (new_id != NULL) {
+        copy_parent_links(layer, new_id, mem1.metadata, memory_id_2);
+        copy_parent_links(layer, new_id, mem2.metadata, memory_id_1);
         memory_delete(layer, memory_id_1);
         memory_delete(layer, memory_id_2);
     }
-    
+
+    memory_result_free(&mem1);
+    memory_result_free(&mem2);
+    merged_meta.source = NULL;
+    memory_metadata_free(&merged_meta);
+
     return new_id;
 }
 
@@ -244,38 +346,9 @@ int memory_link(GV_MemoryLayer *layer, const char *memory_id_1,
     if (layer == NULL || memory_id_1 == NULL || memory_id_2 == NULL) {
         return -1;
     }
-    
-    GV_MemoryResult mem1, mem2;
-    if (memory_get(layer, memory_id_1, &mem1) != 0 ||
-        memory_get(layer, memory_id_2, &mem2) != 0) {
-        return -1;
-    }
-    
-    if (mem1.metadata == NULL) {
-        memory_result_free(&mem1);
-        memory_result_free(&mem2);
-        return -1;
-    }
-    
-    size_t new_count = mem1.metadata->related_count + 1;
-    char **new_related = (char **)realloc(mem1.metadata->related_memory_ids,
-                                            new_count * sizeof(char *));
-    if (new_related == NULL) {
-        memory_result_free(&mem1);
-        memory_result_free(&mem2);
-        return -1;
-    }
-    
-    new_related[mem1.metadata->related_count] = gv_dup_cstr(memory_id_2);
-    mem1.metadata->related_memory_ids = new_related;
-    mem1.metadata->related_count = new_count;
-    
-    int result = memory_update(layer, memory_id_1, NULL, mem1.metadata);
-    
-    memory_result_free(&mem1);
-    memory_result_free(&mem2);
-    
-    return result;
+
+    return memory_link_create(layer, memory_id_1, memory_id_2, GV_LINK_SIMILAR,
+                              0.9f, "consolidated related");
 }
 
 int memory_archive(GV_MemoryLayer *layer, const char *memory_id) {
