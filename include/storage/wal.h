@@ -87,6 +87,12 @@ int wal_append_update(GV_WAL *wal, size_t vector_index, const float *data, size_
                          size_t metadata_count);
 
 /**
+ * @brief Append an IVFDisk posting-list assignment (audit / replication hook).
+ */
+int wal_append_ivfdisk_append(GV_WAL *wal, uint64_t head_id, uint64_t vector_id,
+                              const float *data, size_t dimension);
+
+/**
  * @brief Replay a WAL file by invoking a callback for every insert record.
  *
  * The callback is responsible for applying the operation to the in-memory
@@ -130,6 +136,8 @@ int wal_replay_rich(const char *path, size_t expected_dimension,
                        int (*on_update)(void *ctx, size_t vector_index, const float *data,
                                         size_t dimension, const char *const *metadata_keys,
                                         const char *const *metadata_values, size_t metadata_count),
+                       int (*on_ivfdisk_append)(void *ctx, uint64_t head_id, uint64_t vector_id,
+                                                const float *data, size_t dimension),
                        void *ctx, uint32_t expected_index_type);
 
 /**
@@ -173,6 +181,43 @@ int wal_reset(const char *path);
  * @return 0 on success, -1 on error.
  */
 int wal_truncate(GV_WAL *wal);
+
+/**
+ * @brief Count WAL records in a file (excluding header).
+ */
+uint64_t wal_count_entries(const char *path);
+
+/**
+ * @brief Read one WAL record by zero-based entry index.
+ *
+ * @return 0 on success, -1 on error or if index out of range.
+ */
+int wal_read_entry_at(const char *path, uint64_t entry_index, uint8_t *out_type,
+                      uint8_t **out_buf, size_t *out_len);
+
+/**
+ * @brief Append a pre-serialized WAL record (type byte + payload + optional CRC).
+ */
+int wal_append_raw(GV_WAL *wal, const uint8_t *record, size_t len);
+
+/**
+ * @brief Parse and apply one WAL record buffer via replay callbacks.
+ */
+int wal_apply_record_buffer(const uint8_t *record, size_t len, int has_crc,
+                            size_t expected_dimension,
+                            int (*on_insert)(void *ctx, const float *data, size_t dimension,
+                                             const char *const *metadata_keys,
+                                             const char *const *metadata_values,
+                                             size_t metadata_count),
+                            int (*on_delete)(void *ctx, size_t vector_index),
+                            int (*on_update)(void *ctx, size_t vector_index,
+                                             const float *data, size_t dimension,
+                                             const char *const *metadata_keys,
+                                             const char *const *metadata_values,
+                                             size_t metadata_count),
+                            int (*on_ivfdisk_append)(void *ctx, uint64_t head_id, uint64_t vector_id,
+                                                     const float *data, size_t dimension),
+                            void *ctx);
 
 #ifdef __cplusplus
 }

@@ -20,9 +20,15 @@ extern "C" {
  *   -- Vector search
  *   SELECT * FROM vectors ANN(query=[0.1,0.2,...], k=10, metric=cosine)
  *   SELECT * FROM vectors ANN(query=[0.1,0.2,...], k=10) WHERE category = 'science'
+ *   SELECT * FROM vectors ANN(query=[...], k=10)
+ *     ORDER BY vector_distance(query=[...]) DESC LIMIT 5
+ *
+ *   -- Column projection
+ *   SELECT category, score FROM vectors WHERE category = 'science'
  *
  *   -- Metadata queries
  *   SELECT * FROM vectors WHERE score > 0.5 AND category = 'tech' LIMIT 100
+ *   SELECT * FROM vectors WHERE category = 'tech' ORDER BY category ASC LIMIT 100
  *
  *   -- Count
  *   SELECT COUNT(*) FROM vectors WHERE status = 'active'
@@ -38,6 +44,7 @@ typedef struct {
     size_t *indices;          /**< Array of matching vector indices (row_count elements). */
     float *distances;         /**< Array of distances for ANN queries (row_count elements); NULL for non-ANN. */
     char **metadata_jsons;    /**< Array of JSON-serialized metadata strings (row_count elements). */
+    char **column_values;     /**< Row-major cell values (row_count * column_count elements). */
     size_t row_count;         /**< Number of result rows. */
     size_t column_count;      /**< Number of columns in the result set. */
     char **column_names;      /**< Array of column name strings (column_count elements). */

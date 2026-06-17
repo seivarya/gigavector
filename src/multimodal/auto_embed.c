@@ -25,6 +25,7 @@
 #include "core/utils.h"
 
 #define AE_DEFAULT_DIMENSION         1536
+#define AE_GOOGLE_DEFAULT_DIMENSION  768
 #define AE_DEFAULT_MAX_CACHE         10000
 #define AE_DEFAULT_MAX_TEXT_LENGTH   8192
 #define AE_DEFAULT_BATCH_SIZE        32
@@ -77,6 +78,24 @@ struct GV_AutoEmbedder {
 
     pthread_mutex_t      mutex;
 };
+
+static const char *ae_default_model(GV_AutoEmbedProvider provider) {
+    switch (provider) {
+    case GV_EMBED_PROVIDER_GOOGLE:
+        return "text-embedding-004";
+    default:
+        return "text-embedding-3-small";
+    }
+}
+
+static size_t ae_default_dimension(GV_AutoEmbedProvider provider) {
+    switch (provider) {
+    case GV_EMBED_PROVIDER_GOOGLE:
+        return AE_GOOGLE_DEFAULT_DIMENSION;
+    default:
+        return AE_DEFAULT_DIMENSION;
+    }
+}
 
 #ifdef HAVE_CURL
 typedef struct {
@@ -727,7 +746,8 @@ static void ae_resolve_url(const GV_AutoEmbedder *em, char *url, size_t url_cap)
         snprintf(url, url_cap, "https://api.openai.com/v1/embeddings");
         break;
     case GV_EMBED_PROVIDER_GOOGLE: {
-        const char *m = em->model_name ? em->model_name : "text-embedding-004";
+        const char *m = em->model_name ? em->model_name
+                                       : ae_default_model(GV_EMBED_PROVIDER_GOOGLE);
         if (strncmp(m, "models/", 7) == 0) {
             snprintf(url, url_cap,
                      "https://generativelanguage.googleapis.com/v1beta/%s:embedContent", m);
@@ -761,7 +781,8 @@ static void ae_resolve_url(const GV_AutoEmbedder *em, char *url, size_t url_cap)
 static void ae_resolve_batch_url(const GV_AutoEmbedder *em, char *url,
                                  size_t url_cap) {
     if (em->provider == GV_EMBED_PROVIDER_GOOGLE) {
-        const char *m = em->model_name ? em->model_name : "text-embedding-004";
+        const char *m = em->model_name ? em->model_name
+                                       : ae_default_model(GV_EMBED_PROVIDER_GOOGLE);
         if (strncmp(m, "models/", 7) == 0) {
             snprintf(url, url_cap,
                      "https://generativelanguage.googleapis.com/v1beta/%s:batchEmbedContents", m);
@@ -850,7 +871,7 @@ static int ae_embed_single_http(GV_AutoEmbedder *em, const char *text,
 #ifdef HAVE_CURL
     if (!em->curl) return -1;
 
-    const char *model = em->model_name ? em->model_name : "text-embedding-3-small";
+    const char *model = em->model_name ? em->model_name : ae_default_model(em->provider);
     char *req_body = NULL;
 
     switch (em->provider) {
@@ -907,7 +928,7 @@ static int ae_embed_batch_http(GV_AutoEmbedder *em, const char *const *texts,
 #ifdef HAVE_CURL
     if (!em->curl) return -1;
 
-    const char *model = em->model_name ? em->model_name : "text-embedding-3-small";
+    const char *model = em->model_name ? em->model_name : ae_default_model(em->provider);
     char *req_body = NULL;
 
     switch (em->provider) {
@@ -957,7 +978,7 @@ void auto_embed_config_init(GV_AutoEmbedConfig *config) {
     if (!config) return;
     memset(config, 0, sizeof(*config));
     config->provider          = GV_EMBED_PROVIDER_OPENAI;
-    config->dimension         = AE_DEFAULT_DIMENSION;
+    config->dimension         = 0;
     config->cache_embeddings  = 1;
     config->max_cache_entries = AE_DEFAULT_MAX_CACHE;
     config->max_text_length   = AE_DEFAULT_MAX_TEXT_LENGTH;
@@ -974,7 +995,8 @@ GV_AutoEmbedder *auto_embed_create(const GV_AutoEmbedConfig *config) {
     em->api_key         = config->api_key    ? gv_dup_cstr(config->api_key)    : NULL;
     em->model_name      = config->model_name ? gv_dup_cstr(config->model_name) : NULL;
     em->base_url        = config->base_url   ? gv_dup_cstr(config->base_url)   : NULL;
-    em->dimension       = config->dimension > 0 ? config->dimension : AE_DEFAULT_DIMENSION;
+    em->dimension       = config->dimension > 0 ? config->dimension
+                                                : ae_default_dimension(config->provider);
     em->max_text_length = config->max_text_length > 0 ? config->max_text_length
                                                       : AE_DEFAULT_MAX_TEXT_LENGTH;
     em->batch_size      = config->batch_size > 0 ? config->batch_size

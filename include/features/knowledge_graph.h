@@ -397,6 +397,19 @@ int kg_get_neighbors(const GV_KnowledgeGraph *kg, uint64_t entity_id,
 int kg_traverse(const GV_KnowledgeGraph *kg, uint64_t start,
                     size_t max_depth, uint64_t *out_ids, size_t max_count);
 
+typedef struct {
+    uint64_t entity_id;
+    float activation;
+} GV_KGActivation;
+
+/**
+ * @brief Spreading activation from seed entities with optional causal edge boost.
+ */
+int kg_spreading_activation(const GV_KnowledgeGraph *kg,
+                            const uint64_t *seed_entities, size_t seed_count,
+                            size_t max_depth, float causal_boost,
+                            GV_KGActivation *out, size_t max_out);
+
 /**
  * @brief Find the shortest path between two entities (BFS).
  *

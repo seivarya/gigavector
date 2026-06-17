@@ -162,6 +162,18 @@ bool json_object_has(const GV_JsonValue *object, const char *key);
 size_t json_object_length(const GV_JsonValue *object);
 
 /**
+ * @brief Get key name at index in a JSON object.
+ * @return Key string or NULL if out of range / not an object.
+ */
+const char *json_object_key_at(const GV_JsonValue *object, size_t index);
+
+/**
+ * @brief Get value at index in a JSON object.
+ * @return Value pointer or NULL if out of range / not an object.
+ */
+GV_JsonValue *json_object_value_at(const GV_JsonValue *object, size_t index);
+
+/**
  * @brief Query a boolean condition.
  *
  * @param value value.

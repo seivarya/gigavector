@@ -40,7 +40,7 @@ typedef struct {
     int agent_type;                     /**< GV_AgentType value. */
     const char *llm_provider;           /**< Provider string: "openai", "anthropic", or "google". */
     const char *api_key;                /**< API key for the LLM provider. */
-    const char *model;                  /**< Model name (default: "gpt-4o-mini"). */
+    const char *model;                  /**< Model name (provider default if NULL). */
     float temperature;                  /**< Sampling temperature (default: 0.0). */
     int max_retries;                    /**< Maximum LLM call retries (default: 2). */
     const char *system_prompt_override; /**< Custom system prompt; NULL for built-in default. */

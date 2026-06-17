@@ -2,6 +2,8 @@
 #define GIGAVECTOR_GV_SOA_STORAGE_H
 
 #include <stddef.h>
+#include <stdio.h>
+#include <stdint.h>
 #include "core/types.h"
 
 #ifdef __cplusplus
@@ -140,6 +142,9 @@ int soa_storage_update_data(GV_SoAStorage *storage, size_t index, const float *d
  * @return 0 on success, -1 on invalid arguments.
  */
 int soa_storage_update_metadata(GV_SoAStorage *storage, size_t index, GV_Metadata *metadata);
+
+int soa_storage_save(const GV_SoAStorage *storage, FILE *out, uint32_t version);
+int soa_storage_load(GV_SoAStorage *storage, FILE *in, uint32_t version);
 
 #ifdef __cplusplus
 }

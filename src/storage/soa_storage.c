@@ -1,8 +1,77 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
+#include <stdio.h>
 #include "storage/soa_storage.h"
 #include "schema/metadata.h"
+#include "schema/vector.h"
+#include "core/utils.h"
+
+#define GV_SOA_SAVE_MAGIC 0x534F4153u /* "SOAS" */
+
+static int soa_read_metadata(FILE *in, GV_Metadata **out)
+{
+    *out = NULL;
+    uint32_t count = 0;
+    if (read_u32(in, &count) != 0) return -1;
+    GV_Vector tmp = { .dimension = 0, .data = NULL, .metadata = NULL };
+    for (uint32_t i = 0; i < count; ++i) {
+        char *key = read_string(in);
+        char *value = read_string(in);
+        if (!key || !value) {
+            free(key);
+            free(value);
+            vector_clear_metadata(&tmp);
+            return -1;
+        }
+        if (vector_set_metadata(&tmp, key, value) != 0) {
+            free(key);
+            free(value);
+            vector_clear_metadata(&tmp);
+            return -1;
+        }
+        free(key);
+        free(value);
+    }
+    *out = tmp.metadata;
+    return 0;
+}
+
+static int soa_storage_grow(GV_SoAStorage *storage, size_t min_capacity)
+{
+    if (storage->capacity >= min_capacity) return 0;
+    size_t new_capacity = storage->capacity ? storage->capacity : 1024;
+    while (new_capacity < min_capacity) {
+        if (new_capacity > SIZE_MAX / 2) return -1;
+        new_capacity *= 2;
+    }
+    if (storage->dimension == 0 ||
+        new_capacity > SIZE_MAX / storage->dimension / sizeof(float)) {
+        return -1;
+    }
+    size_t new_data_size = new_capacity * storage->dimension * sizeof(float);
+    float *tmp_data = (float *)realloc(storage->data, new_data_size);
+    GV_Metadata **tmp_meta =
+        (GV_Metadata **)realloc(storage->metadata, new_capacity * sizeof(GV_Metadata *));
+    int *tmp_del = (int *)realloc(storage->deleted, new_capacity * sizeof(int));
+    if (!tmp_data || !tmp_meta || !tmp_del) {
+        if (tmp_data) storage->data = tmp_data;
+        if (tmp_meta) storage->metadata = tmp_meta;
+        if (tmp_del) storage->deleted = tmp_del;
+        return -1;
+    }
+    if (new_capacity > storage->capacity) {
+        memset(tmp_meta + storage->capacity, 0,
+               (new_capacity - storage->capacity) * sizeof(GV_Metadata *));
+        memset(tmp_del + storage->capacity, 0,
+               (new_capacity - storage->capacity) * sizeof(int));
+    }
+    storage->data = tmp_data;
+    storage->metadata = tmp_meta;
+    storage->deleted = tmp_del;
+    storage->capacity = new_capacity;
+    return 0;
+}
 
 GV_SoAStorage *soa_storage_create(size_t dimension, size_t initial_capacity) {
     if (dimension == 0) {
@@ -186,6 +255,64 @@ int soa_storage_update_metadata(GV_SoAStorage *storage, size_t index, GV_Metadat
         vector_clear_metadata(&temp_vec);
     }
     storage->metadata[index] = metadata;
+    return 0;
+}
+
+int soa_storage_save(const GV_SoAStorage *storage, FILE *out, uint32_t version)
+{
+    if (!storage || !out) return -1;
+    (void)version;
+    if (write_u32(out, GV_SOA_SAVE_MAGIC) != 0) return -1;
+    if (write_u32(out, (uint32_t)storage->dimension) != 0) return -1;
+    if (write_u64(out, (uint64_t)storage->count) != 0) return -1;
+
+    for (size_t i = 0; i < storage->count; ++i) {
+        if (write_u32(out, (uint32_t)storage->deleted[i]) != 0) return -1;
+        if (fwrite(storage->data + i * storage->dimension, sizeof(float),
+                   storage->dimension, out) != storage->dimension) {
+            return -1;
+        }
+        if (write_metadata(out, storage->metadata[i]) != 0) return -1;
+    }
+    return 0;
+}
+
+int soa_storage_load(GV_SoAStorage *storage, FILE *in, uint32_t version)
+{
+    if (!storage || !in) return -1;
+    (void)version;
+
+    uint32_t magic = 0, dim = 0;
+    uint64_t count = 0;
+    if (read_u32(in, &magic) != 0 || magic != GV_SOA_SAVE_MAGIC) return -1;
+    if (read_u32(in, &dim) != 0) return -1;
+    if (read_u64(in, &count) != 0) return -1;
+    if (dim == 0 || count > 100000000u) return -1;
+    if (storage->dimension != 0 && storage->dimension != (size_t)dim) return -1;
+    storage->dimension = (size_t)dim;
+
+    if (soa_storage_grow(storage, (size_t)count) != 0) return -1;
+
+    for (size_t i = 0; i < storage->count; ++i) {
+        if (storage->metadata[i]) {
+            GV_Vector tmp = { .dimension = storage->dimension, .data = NULL,
+                              .metadata = storage->metadata[i] };
+            vector_clear_metadata(&tmp);
+            storage->metadata[i] = NULL;
+        }
+    }
+
+    storage->count = (size_t)count;
+    for (size_t i = 0; i < storage->count; ++i) {
+        uint32_t deleted = 0;
+        if (read_u32(in, &deleted) != 0) return -1;
+        storage->deleted[i] = (int)deleted;
+        if (fread(storage->data + i * storage->dimension, sizeof(float),
+                  storage->dimension, in) != storage->dimension) {
+            return -1;
+        }
+        if (soa_read_metadata(in, &storage->metadata[i]) != 0) return -1;
+    }
     return 0;
 }
 

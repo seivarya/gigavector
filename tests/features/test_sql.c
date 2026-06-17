@@ -235,6 +235,124 @@ static int test_explain_trailing_semicolon(void) {
     return 0;
 }
 
+static int test_delete(void) {
+    GV_Database *db = create_test_db();
+    ASSERT(db != NULL, "create_test_db should succeed");
+
+    GV_SQLEngine *eng = sql_create(db);
+    ASSERT(eng != NULL, "sql engine create should succeed");
+
+    GV_SQLResult result;
+    memset(&result, 0, sizeof(result));
+    int rc = sql_execute(eng, "DELETE FROM vectors WHERE category = 'science'", &result);
+    ASSERT(rc == 0, "DELETE should succeed");
+    ASSERT(result.row_count == 1, "DELETE should return one summary row");
+    ASSERT(result.indices[0] == 2, "should delete two science vectors");
+
+    sql_free_result(&result);
+    sql_destroy(eng);
+    db_close(db);
+    return 0;
+}
+
+static int test_update(void) {
+    GV_Database *db = create_test_db();
+    ASSERT(db != NULL, "create_test_db should succeed");
+
+    GV_SQLEngine *eng = sql_create(db);
+    ASSERT(eng != NULL, "sql engine create should succeed");
+
+    GV_SQLResult result;
+    memset(&result, 0, sizeof(result));
+    int rc = sql_execute(eng,
+        "UPDATE vectors SET status = 'archived' WHERE category = 'tech'",
+        &result);
+    ASSERT(rc == 0, "UPDATE should succeed");
+    ASSERT(result.row_count == 1, "UPDATE should return one summary row");
+    ASSERT(result.indices[0] == 2, "should update two tech vectors");
+
+    sql_free_result(&result);
+    sql_destroy(eng);
+    db_close(db);
+    return 0;
+}
+
+static int test_projection_columns(void) {
+    GV_Database *db = create_test_db();
+    ASSERT(db != NULL, "create_test_db should succeed");
+
+    GV_SQLEngine *eng = sql_create(db);
+    ASSERT(eng != NULL, "sql engine create should succeed");
+
+    GV_SQLResult result;
+    memset(&result, 0, sizeof(result));
+    int rc = sql_execute(eng,
+        "SELECT category FROM vectors WHERE category = 'science' LIMIT 10",
+        &result);
+    ASSERT(rc == 0, "projection SELECT should succeed");
+    ASSERT(result.column_count == 1, "should have one projected column");
+    ASSERT(result.column_names != NULL, "column names should be allocated");
+    ASSERT(strcmp(result.column_names[0], "category") == 0, "column name should be category");
+    ASSERT(result.row_count == 2, "two science rows should match");
+    ASSERT(result.column_values != NULL, "column values should be allocated");
+    ASSERT(strcmp(result.column_values[0], "science") == 0, "first projected value");
+
+    sql_free_result(&result);
+    sql_destroy(eng);
+    db_close(db);
+    return 0;
+}
+
+static int test_order_by_metadata(void) {
+    GV_Database *db = create_test_db();
+    ASSERT(db != NULL, "create_test_db should succeed");
+
+    GV_SQLEngine *eng = sql_create(db);
+    ASSERT(eng != NULL, "sql engine create should succeed");
+
+    GV_SQLResult result;
+    memset(&result, 0, sizeof(result));
+    int rc = sql_execute(eng,
+        "SELECT category FROM vectors ORDER BY category DESC LIMIT 1",
+        &result);
+    ASSERT(rc == 0, "ORDER BY metadata should succeed");
+    ASSERT(result.row_count == 1, "LIMIT 1 should return one row");
+    ASSERT(result.column_values != NULL, "column values should be allocated");
+    ASSERT(strcmp(result.column_values[0], "tech") == 0,
+           "DESC on category should return tech first");
+
+    sql_free_result(&result);
+    sql_destroy(eng);
+    db_close(db);
+    return 0;
+}
+
+static int test_order_by_vector_distance_desc(void) {
+    GV_Database *db = create_test_db();
+    ASSERT(db != NULL, "create_test_db should succeed");
+
+    GV_SQLEngine *eng = sql_create(db);
+    ASSERT(eng != NULL, "sql engine create should succeed");
+
+    GV_SQLResult result;
+    memset(&result, 0, sizeof(result));
+    int rc = sql_execute(eng,
+        "SELECT index, distance FROM vectors "
+        "ANN(query=[1.0,0.0,0.0,0.0], k=4) "
+        "ORDER BY vector_distance(query=[1.0,0.0,0.0,0.0]) DESC LIMIT 1",
+        &result);
+    ASSERT(rc == 0, "ORDER BY vector_distance DESC should succeed");
+    ASSERT(result.row_count == 1, "LIMIT 1 should return one row");
+    ASSERT(result.distances != NULL, "distances should be populated");
+    ASSERT(result.column_count == 2, "should project index and distance");
+    ASSERT(result.distances[0] >= 0.0f, "distance should be non-negative");
+
+    sql_free_result(&result);
+    sql_destroy(eng);
+    db_close(db);
+    return 0;
+}
+
 typedef int (*test_fn)(void);
 typedef struct { const char *name; test_fn fn; } TestCase;
 
@@ -251,6 +369,11 @@ int main(void) {
         {"Testing sql semicolon and <> ...", test_semicolon_and_not_equal_angle},
         {"Testing sql ORDER BY function syntax...", test_order_by_function_syntax},
         {"Testing sql EXPLAIN semicolon...", test_explain_trailing_semicolon},
+        {"Testing sql DELETE...", test_delete},
+        {"Testing sql UPDATE...", test_update},
+        {"Testing sql projection columns...", test_projection_columns},
+        {"Testing sql ORDER BY metadata...", test_order_by_metadata},
+        {"Testing sql ORDER BY vector_distance DESC...", test_order_by_vector_distance_desc},
     };
     int n = sizeof(tests) / sizeof(tests[0]);
     int passed = 0;

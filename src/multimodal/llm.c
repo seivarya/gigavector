@@ -528,15 +528,44 @@ static int parse_openai_response(const char *response_json, GV_LLMResponse *out)
         }
     }
 
+    out->input_tokens = 0;
+    out->output_tokens = 0;
+    out->cache_read_tokens = 0;
+    out->cache_write_tokens = 0;
     out->token_count = 0;
     GV_JsonValue *usage = json_object_get(root, "usage");
     if (usage && json_is_object(usage)) {
+        double prompt_tokens = 0.0;
+        double completion_tokens = 0.0;
+        double cached_tokens = 0.0;
+        double total_tokens = 0.0;
+        GV_JsonValue *prompt = json_object_get(usage, "prompt_tokens");
+        GV_JsonValue *completion = json_object_get(usage, "completion_tokens");
         GV_JsonValue *total = json_object_get(usage, "total_tokens");
+        GV_JsonValue *details = json_object_get(usage, "prompt_tokens_details");
+        if (prompt && json_is_number(prompt)) {
+            json_get_number(prompt, &prompt_tokens);
+        }
+        if (completion && json_is_number(completion)) {
+            json_get_number(completion, &completion_tokens);
+        }
         if (total && json_is_number(total)) {
-            double tokens;
-            if (json_get_number(total, &tokens) == GV_JSON_OK) {
-                out->token_count = (int)tokens;
+            json_get_number(total, &total_tokens);
+        }
+        if (details && json_is_object(details)) {
+            GV_JsonValue *cached = json_object_get(details, "cached_tokens");
+            if (cached && json_is_number(cached)) {
+                json_get_number(cached, &cached_tokens);
             }
+        }
+        if (cached_tokens > prompt_tokens) cached_tokens = prompt_tokens;
+        out->cache_read_tokens = (int)cached_tokens;
+        out->input_tokens = (int)(prompt_tokens - cached_tokens);
+        out->output_tokens = (int)completion_tokens;
+        if (total_tokens > 0.0) {
+            out->token_count = (int)total_tokens;
+        } else {
+            out->token_count = (int)(prompt_tokens + completion_tokens);
         }
     }
 
@@ -576,15 +605,41 @@ static int parse_gemini_response(const char *response_json, GV_LLMResponse *out)
         }
     }
 
+    out->input_tokens = 0;
+    out->output_tokens = 0;
+    out->cache_read_tokens = 0;
+    out->cache_write_tokens = 0;
     out->token_count = 0;
     GV_JsonValue *usage = json_object_get(root, "usageMetadata");
     if (usage && json_is_object(usage)) {
+        double prompt_tokens = 0.0;
+        double completion_tokens = 0.0;
+        double cached_tokens = 0.0;
+        double total_tokens = 0.0;
+        GV_JsonValue *prompt = json_object_get(usage, "promptTokenCount");
+        GV_JsonValue *completion = json_object_get(usage, "candidatesTokenCount");
         GV_JsonValue *total = json_object_get(usage, "totalTokenCount");
+        GV_JsonValue *cached = json_object_get(usage, "cachedContentTokenCount");
+        if (prompt && json_is_number(prompt)) {
+            json_get_number(prompt, &prompt_tokens);
+        }
+        if (completion && json_is_number(completion)) {
+            json_get_number(completion, &completion_tokens);
+        }
         if (total && json_is_number(total)) {
-            double tokens;
-            if (json_get_number(total, &tokens) == GV_JSON_OK) {
-                out->token_count = (int)tokens;
-            }
+            json_get_number(total, &total_tokens);
+        }
+        if (cached && json_is_number(cached)) {
+            json_get_number(cached, &cached_tokens);
+        }
+        if (cached_tokens > prompt_tokens) cached_tokens = prompt_tokens;
+        out->cache_read_tokens = (int)cached_tokens;
+        out->input_tokens = (int)(prompt_tokens - cached_tokens);
+        out->output_tokens = (int)completion_tokens;
+        if (total_tokens > 0.0) {
+            out->token_count = (int)total_tokens;
+        } else {
+            out->token_count = (int)(prompt_tokens + completion_tokens);
         }
     }
 
@@ -646,19 +701,64 @@ static int parse_anthropic_response(const char *response_json, GV_LLMResponse *o
         }
     }
 
+    out->input_tokens = 0;
+    out->output_tokens = 0;
+    out->cache_read_tokens = 0;
+    out->cache_write_tokens = 0;
+    out->cache_write_5m_tokens = 0;
+    out->cache_write_1h_tokens = 0;
     out->token_count = 0;
     GV_JsonValue *usage = json_object_get(root, "usage");
     if (usage && json_is_object(usage)) {
-        double input_tokens = 0, output_tokens = 0;
+        double input_tokens = 0.0;
+        double output_tokens = 0.0;
+        double cache_read = 0.0;
+        double cache_write = 0.0;
+        double cache_write_5m = 0.0;
+        double cache_write_1h = 0.0;
         GV_JsonValue *input = json_object_get(usage, "input_tokens");
         GV_JsonValue *output = json_object_get(usage, "output_tokens");
+        GV_JsonValue *cache_read_val = json_object_get(usage, "cache_read_input_tokens");
+        GV_JsonValue *cache_write_val = json_object_get(usage, "cache_creation_input_tokens");
+        GV_JsonValue *cache_creation = json_object_get(usage, "cache_creation");
         if (input && json_is_number(input)) {
             json_get_number(input, &input_tokens);
         }
         if (output && json_is_number(output)) {
             json_get_number(output, &output_tokens);
         }
-        out->token_count = (int)(input_tokens + output_tokens);
+        if (cache_read_val && json_is_number(cache_read_val)) {
+            json_get_number(cache_read_val, &cache_read);
+        }
+        if (cache_write_val && json_is_number(cache_write_val)) {
+            json_get_number(cache_write_val, &cache_write);
+        }
+        if (cache_creation && json_is_object(cache_creation)) {
+            GV_JsonValue *ephemeral_5m =
+                json_object_get(cache_creation, "ephemeral_5m_input_tokens");
+            GV_JsonValue *ephemeral_1h =
+                json_object_get(cache_creation, "ephemeral_1h_input_tokens");
+            if (ephemeral_5m && json_is_number(ephemeral_5m)) {
+                json_get_number(ephemeral_5m, &cache_write_5m);
+            }
+            if (ephemeral_1h && json_is_number(ephemeral_1h)) {
+                json_get_number(ephemeral_1h, &cache_write_1h);
+            }
+        }
+        out->input_tokens = (int)input_tokens;
+        out->output_tokens = (int)output_tokens;
+        out->cache_read_tokens = (int)cache_read;
+        if (cache_write_5m > 0.0 || cache_write_1h > 0.0) {
+            out->cache_write_5m_tokens = (int)cache_write_5m;
+            out->cache_write_1h_tokens = (int)cache_write_1h;
+            out->cache_write_tokens = (int)(cache_write_5m + cache_write_1h);
+        } else {
+            out->cache_write_tokens = (int)cache_write;
+        }
+        out->token_count = (int)(input_tokens + output_tokens + cache_read
+                               + (cache_write_5m > 0.0 || cache_write_1h > 0.0
+                                  ? cache_write_5m + cache_write_1h
+                                  : cache_write));
     }
 
     json_free(root);

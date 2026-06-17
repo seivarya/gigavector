@@ -1505,6 +1505,157 @@ int kg_traverse(const GV_KnowledgeGraph *kg, uint64_t start,
     return (int)count;
 }
 
+static int kg_is_causal_predicate(const char *predicate) {
+    if (!predicate) return 0;
+    return strcmp(predicate, "causes") == 0 ||
+           strcmp(predicate, "caused_by") == 0 ||
+           strcmp(predicate, "enables") == 0 ||
+           strcmp(predicate, "prevents") == 0;
+}
+
+int kg_spreading_activation(const GV_KnowledgeGraph *kg,
+                            const uint64_t *seed_entities, size_t seed_count,
+                            size_t max_depth, float causal_boost,
+                            GV_KGActivation *out, size_t max_out) {
+    if (!kg || !seed_entities || seed_count == 0 || !out || max_out == 0) {
+        return -1;
+    }
+    if (causal_boost < 1.0f) causal_boost = 1.0f;
+
+    pthread_rwlock_rdlock((pthread_rwlock_t *)&kg->rwlock);
+
+    size_t out_count = 0;
+    uint64_t *queue_ids = (uint64_t *)malloc(max_out * sizeof(uint64_t));
+    float *queue_act = (float *)malloc(max_out * sizeof(float));
+    size_t *queue_depth = (size_t *)malloc(max_out * sizeof(size_t));
+    if (!queue_ids || !queue_act || !queue_depth) {
+        free(queue_ids);
+        free(queue_act);
+        free(queue_depth);
+        pthread_rwlock_unlock((pthread_rwlock_t *)&kg->rwlock);
+        return -1;
+    }
+
+    size_t q_head = 0;
+    size_t q_tail = 0;
+
+    for (size_t s = 0; s < seed_count; s++) {
+        if (!kg_find_entity_node(kg, seed_entities[s])) continue;
+        size_t exists = 0;
+        for (size_t j = 0; j < out_count; j++) {
+            if (out[j].entity_id == seed_entities[s]) {
+                exists = 1;
+                break;
+            }
+        }
+        if (!exists && out_count < max_out) {
+            out[out_count].entity_id = seed_entities[s];
+            out[out_count].activation = 1.0f;
+            out_count++;
+        }
+        if (q_tail < max_out) {
+            queue_ids[q_tail] = seed_entities[s];
+            queue_act[q_tail] = 1.0f;
+            queue_depth[q_tail] = 0;
+            q_tail++;
+        }
+    }
+
+    if (out_count == 0) {
+        free(queue_ids);
+        free(queue_act);
+        free(queue_depth);
+        pthread_rwlock_unlock((pthread_rwlock_t *)&kg->rwlock);
+        return 0;
+    }
+
+    while (q_head < q_tail) {
+        uint64_t cur = queue_ids[q_head];
+        float act = queue_act[q_head];
+        size_t dep = queue_depth[q_head];
+        q_head++;
+        if (dep >= max_depth || act < 0.05f) continue;
+
+        KG_IndexEntry *se = kg_index_find(kg->subject_index, kg->spo_bucket_count, cur);
+        if (se) {
+            for (size_t i = 0; i < se->list.count; i++) {
+                KG_RelationNode *rn = kg_find_relation_node(kg, se->list.ids[i]);
+                if (!rn) continue;
+                uint64_t nbr = rn->relation.object_id;
+                float edge = 0.7f * rn->relation.weight;
+                if (kg_is_causal_predicate(rn->relation.predicate)) {
+                    edge *= causal_boost;
+                }
+                float nact = act * edge;
+                if (nact < 0.05f) continue;
+
+                size_t idx = SIZE_MAX;
+                for (size_t j = 0; j < out_count; j++) {
+                    if (out[j].entity_id == nbr) {
+                        idx = j;
+                        break;
+                    }
+                }
+                if (idx != SIZE_MAX) {
+                    if (nact > out[idx].activation) out[idx].activation = nact;
+                } else if (out_count < max_out) {
+                    out[out_count].entity_id = nbr;
+                    out[out_count].activation = nact;
+                    out_count++;
+                }
+                if (q_tail < max_out && dep + 1 <= max_depth) {
+                    queue_ids[q_tail] = nbr;
+                    queue_act[q_tail] = nact;
+                    queue_depth[q_tail] = dep + 1;
+                    q_tail++;
+                }
+            }
+        }
+
+        KG_IndexEntry *oe = kg_index_find(kg->object_index, kg->spo_bucket_count, cur);
+        if (oe) {
+            for (size_t i = 0; i < oe->list.count; i++) {
+                KG_RelationNode *rn = kg_find_relation_node(kg, oe->list.ids[i]);
+                if (!rn) continue;
+                uint64_t nbr = rn->relation.subject_id;
+                float edge = 0.7f * rn->relation.weight;
+                if (kg_is_causal_predicate(rn->relation.predicate)) {
+                    edge *= causal_boost;
+                }
+                float nact = act * edge;
+                if (nact < 0.05f) continue;
+
+                size_t idx = SIZE_MAX;
+                for (size_t j = 0; j < out_count; j++) {
+                    if (out[j].entity_id == nbr) {
+                        idx = j;
+                        break;
+                    }
+                }
+                if (idx != SIZE_MAX) {
+                    if (nact > out[idx].activation) out[idx].activation = nact;
+                } else if (out_count < max_out) {
+                    out[out_count].entity_id = nbr;
+                    out[out_count].activation = nact;
+                    out_count++;
+                }
+                if (q_tail < max_out && dep + 1 <= max_depth) {
+                    queue_ids[q_tail] = nbr;
+                    queue_act[q_tail] = nact;
+                    queue_depth[q_tail] = dep + 1;
+                    q_tail++;
+                }
+            }
+        }
+    }
+
+    free(queue_ids);
+    free(queue_act);
+    free(queue_depth);
+    pthread_rwlock_unlock((pthread_rwlock_t *)&kg->rwlock);
+    return (int)out_count;
+}
+
 int kg_shortest_path(const GV_KnowledgeGraph *kg, uint64_t from,
                          uint64_t to, uint64_t *path_ids, size_t max_len) {
     if (!kg || !path_ids || max_len == 0) return -1;

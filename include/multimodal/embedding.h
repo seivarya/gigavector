@@ -26,7 +26,7 @@ typedef enum {
 
 typedef struct {
     GV_EmbeddingProvider provider;           /**< Provider type */
-    char *api_key;                           /**< API key (for OpenAI/Custom) */
+    char *api_key;                           /**< API key (for OpenAI/Custom/Google) */
     char *model;                             /**< Model name/identifier */
     char *base_url;                          /**< Base URL (for Custom provider) */
     size_t embedding_dimension;              /**< Expected embedding dimension (0 = auto-detect) */

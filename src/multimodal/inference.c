@@ -26,6 +26,7 @@
 /* Constants */
 
 #define INF_DEFAULT_DIMENSION     1536
+#define INF_GOOGLE_DIMENSION      768
 #define INF_DEFAULT_CACHE_SIZE    10000
 #define INF_DEFAULT_DISTANCE_TYPE 1       /* GV_DISTANCE_COSINE */
 
@@ -58,6 +59,20 @@ static GV_AutoEmbedProvider inf_resolve_provider(const char *name) {
 
     /* Default / "openai" */
     return GV_EMBED_PROVIDER_OPENAI;
+}
+
+static const char *inf_default_model(const char *provider) {
+    if (provider && strcmp(provider, "google") == 0) {
+        return "text-embedding-004";
+    }
+    return "text-embedding-3-small";
+}
+
+static size_t inf_default_dimension(const char *provider) {
+    if (provider && strcmp(provider, "google") == 0) {
+        return INF_GOOGLE_DIMENSION;
+    }
+    return INF_DEFAULT_DIMENSION;
 }
 
 /* Metadata helpers */
@@ -173,13 +188,15 @@ GV_InferenceEngine *inference_create(void *db,
                                         const GV_InferenceConfig *config) {
     if (!db || !config) return NULL;
 
+    const char *provider = config->embed_provider ? config->embed_provider : "openai";
+
     GV_InferenceEngine *eng = (GV_InferenceEngine *)calloc(1, sizeof(*eng));
     if (!eng) return NULL;
 
     eng->db            = (GV_Database *)db;
     eng->distance_type = config->distance_type;
     eng->dimension     = config->dimension > 0 ? config->dimension
-                                                : INF_DEFAULT_DIMENSION;
+                                                : inf_default_dimension(provider);
 
     /* Initialize the mutex */
     if (pthread_mutex_init(&eng->mutex, NULL) != 0) {
@@ -191,10 +208,10 @@ GV_InferenceEngine *inference_create(void *db,
     GV_AutoEmbedConfig ae_cfg;
     auto_embed_config_init(&ae_cfg);
 
-    ae_cfg.provider          = inf_resolve_provider(config->embed_provider);
+    ae_cfg.provider          = inf_resolve_provider(provider);
     ae_cfg.api_key           = config->api_key;
     ae_cfg.model_name        = config->model ? config->model
-                                             : "text-embedding-3-small";
+                                             : inf_default_model(provider);
     ae_cfg.dimension         = eng->dimension;
     ae_cfg.cache_embeddings  = 1;
     ae_cfg.max_cache_entries = config->cache_size > 0 ? config->cache_size

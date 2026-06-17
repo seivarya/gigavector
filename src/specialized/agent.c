@@ -34,7 +34,9 @@
 #define AGENT_MAX_USER_MSG_SIZE    (8 * 1024)
 #define AGENT_MAX_FILTER_SIZE      1024
 #define AGENT_MAX_RESPONSE_TEXT    4096
-#define AGENT_DEFAULT_MODEL        "gpt-4o-mini"
+#define AGENT_DEFAULT_MODEL            "gpt-4o-mini"
+#define AGENT_DEFAULT_MODEL_GOOGLE     "gemini-2.5-flash"
+#define AGENT_DEFAULT_MODEL_ANTHROPIC  "claude-3-haiku-20240307"
 #define AGENT_DEFAULT_TEMPERATURE  0.0f
 #define AGENT_DEFAULT_MAX_RETRIES  2
 #define AGENT_OVERSAMPLE_FACTOR    4
@@ -117,6 +119,17 @@ static GV_LLMProvider provider_from_string(const char *provider) {
     return GV_LLM_PROVIDER_OPENAI;
 }
 
+static const char *agent_default_model(GV_LLMProvider provider) {
+    switch (provider) {
+    case GV_LLM_PROVIDER_GOOGLE:
+        return AGENT_DEFAULT_MODEL_GOOGLE;
+    case GV_LLM_PROVIDER_ANTHROPIC:
+        return AGENT_DEFAULT_MODEL_ANTHROPIC;
+    default:
+        return AGENT_DEFAULT_MODEL;
+    }
+}
+
 /**
  * @brief Map distance string from LLM response to GV_DistanceType.
  */
@@ -176,6 +189,7 @@ static char *build_system_prompt(GV_AgentType type, const char *override,
             case GV_INDEX_TYPE_IVFPQ:   index_name = "ivfpq";   break;
             case GV_INDEX_TYPE_FLAT:    index_name = "flat";     break;
             case GV_INDEX_TYPE_IVFFLAT: index_name = "ivfflat";  break;
+            case GV_INDEX_TYPE_IVFSQ8:  index_name = "ivfsq8";   break;
             case GV_INDEX_TYPE_IVFSQ8:  index_name = "ivfsq8";   break;
             case GV_INDEX_TYPE_IVFTURBOQUANT: index_name = "ivfturboquant"; break;
             case GV_INDEX_TYPE_PQ:      index_name = "pq";       break;
@@ -317,7 +331,8 @@ GV_Agent *agent_create(const void *db, const GV_AgentConfig *config) {
         free(agent);
         return NULL;
     }
-    llm_cfg.model = gv_dup_cstr(config->model ? config->model : AGENT_DEFAULT_MODEL);
+    llm_cfg.model = gv_dup_cstr(config->model ? config->model
+                                              : agent_default_model(llm_cfg.provider));
     if (llm_cfg.model == NULL) {
         free(llm_cfg.api_key);
         free(agent);

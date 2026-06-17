@@ -394,6 +394,22 @@ size_t json_object_length(const GV_JsonValue *object) {
     return object->data.object.count;
 }
 
+const char *json_object_key_at(const GV_JsonValue *object, size_t index) {
+    if (object == NULL || object->type != GV_JSON_OBJECT ||
+        index >= object->data.object.count) {
+        return NULL;
+    }
+    return object->data.object.entries[index].key;
+}
+
+GV_JsonValue *json_object_value_at(const GV_JsonValue *object, size_t index) {
+    if (object == NULL || object->type != GV_JSON_OBJECT ||
+        index >= object->data.object.count) {
+        return NULL;
+    }
+    return object->data.object.entries[index].value;
+}
+
 /* Path-based Access */
 
 GV_JsonValue *json_get_path(const GV_JsonValue *root, const char *path) {

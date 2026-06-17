@@ -5,7 +5,7 @@
  * Implements a multi-factor importance scoring algorithm based on research from:
  * - BM25 (Okapi) ranking algorithm for statistical term importance
  * - Ebbinghaus forgetting curve for temporal decay
- * - Cortex's temporal weighting approach
+ * - Exponential recency decay for temporal weighting
  * - Spaced repetition (SM-2) for access patterns
  *
  * Key design principle: NO hardcoded keyword lists.
@@ -609,7 +609,7 @@ double importance_score_extracted(const char *content, size_t len) {
  *
  * Formula: R = e^(-t/S) where S = half_life / ln(2)
  *
- * Based on research from MemoryBank (Zhong et al., 2024) and Cortex.
+ * Based on research from MemoryBank (Zhong et al., 2024).
  */
 double importance_temporal_decay(const GV_TemporalDecayConfig *config,
                                      double age_seconds) {

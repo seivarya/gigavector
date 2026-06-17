@@ -61,7 +61,13 @@ typedef struct {
 typedef struct {
     char *content;                    /**< Generated text content. */
     int finish_reason;                 /**< Finish reason code. */
-    int token_count;                  /**< Number of tokens used. */
+    int input_tokens;                 /**< Uncached prompt / input tokens. */
+    int output_tokens;                /**< Completion / output tokens (if reported). */
+    int cache_read_tokens;            /**< Prompt-cache read / hit tokens. */
+    int cache_write_tokens;           /**< Total cache-write tokens (flat). */
+    int cache_write_5m_tokens;        /**< Anthropic 5-minute TTL cache writes. */
+    int cache_write_1h_tokens;        /**< Anthropic 1-hour TTL cache writes. */
+    int token_count;                  /**< Total tokens used. */
 } GV_LLMResponse;
 
 typedef struct GV_LLM GV_LLM;
