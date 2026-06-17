@@ -18,7 +18,7 @@ DATA_DIR    := snapshots
 BENCH_DIR   := $(BUILD_DIR)/bench
 
 LIB_NAME    := GigaVector
-LIB_VERSION := 0.8.24
+LIB_VERSION := 0.8.25
 STATIC_LIB  := $(LIB_DIR)/lib$(LIB_NAME).a
 
 UNAME_S := $(shell uname -s)
@@ -32,7 +32,7 @@ endif
 
 SRC_FILES   := $(shell find $(SRC_DIR) -name "*.c")
 MAIN_FILE   := main.c
-BENCH_FILES := benchmarks/benchmark_simd.c benchmarks/benchmark_compare.c benchmarks/benchmark_ivfpq.c benchmarks/benchmark_ivfpq_recall.c
+BENCH_FILES := benchmarks/benchmark_simd.c benchmarks/benchmark_compare.c benchmarks/benchmark_ivfpq.c benchmarks/benchmark_ivfpq_recall.c benchmarks/bench_ivfdisk.c
 TEST_DIR    := tests
 
 PYTHON_DIR  := python
@@ -55,8 +55,18 @@ run: $(BIN_DIR)/main
 	@cd $(DATA_DIR) && GV_DATA_DIR="$(abspath $(DATA_DIR))" GV_WAL_DIR="$(abspath $(DATA_DIR))" $(abspath $(BIN_DIR))/main
 
 .PHONY: bench
-bench: $(BENCH_DIR)/benchmark_simd $(BENCH_DIR)/benchmark_compare $(BENCH_DIR)/benchmark_ivfpq $(BENCH_DIR)/benchmark_ivfpq_recall
+bench: $(BENCH_DIR)/benchmark_simd $(BENCH_DIR)/benchmark_compare $(BENCH_DIR)/benchmark_ivfpq $(BENCH_DIR)/benchmark_ivfpq_recall $(BENCH_DIR)/bench_ivfdisk
 	@echo "Benchmarks built in $(BENCH_DIR)"
+
+.PHONY: bench-ivfdisk
+bench-ivfdisk: $(BENCH_DIR)/bench_ivfdisk
+	@echo "=== IVFDisk smoke benchmark (10k x 128) ==="
+	@LD_LIBRARY_PATH=$(LIB_DIR) $(BENCH_DIR)/bench_ivfdisk 10000 128 64 32 30 1
+
+.PHONY: bench-ivfdisk-full
+bench-ivfdisk-full: $(BENCH_DIR)/bench_ivfdisk
+	@echo "=== IVFDisk full benchmark (1M x 128) — expect long runtime ==="
+	@LD_LIBRARY_PATH=$(LIB_DIR) $(BENCH_DIR)/bench_ivfdisk 1000000 128 1024 64 100 0
 
 $(BIN_DIR)/main: $(MAIN_OBJ) $(STATIC_LIB)
 	@mkdir -p $(BIN_DIR)
@@ -87,6 +97,11 @@ $(OBJ_DIR)/$(MAIN_FILE:.c=.o): $(MAIN_FILE)
 	@echo "Compiled $< -> $@"
 
 $(BENCH_DIR)/benchmark_%: benchmarks/benchmark_%.c $(STATIC_LIB)
+	@mkdir -p $(BENCH_DIR)
+	$(CC) $(CFLAGS) $< -L$(LIB_DIR) -l$(LIB_NAME) $(LDFLAGS) -o $@
+	@echo "Built benchmark: $@"
+
+$(BENCH_DIR)/bench_ivfdisk: benchmarks/bench_ivfdisk.c $(STATIC_LIB)
 	@mkdir -p $(BENCH_DIR)
 	$(CC) $(CFLAGS) $< -L$(LIB_DIR) -l$(LIB_NAME) $(LDFLAGS) -o $@
 	@echo "Built benchmark: $@"
@@ -284,3 +299,46 @@ test-coverage-html: test-coverage
 	fi
 
 -include $(DEPS)
+
+# --- libFuzzer targets (clang + -fsanitize=fuzzer) ---
+FUZZ_DIR := $(BUILD_DIR)/fuzz
+FUZZ_CC  := $(shell command -v clang 2>/dev/null)
+FUZZ_CFLAGS := -O1 -g -Wall -Wextra -Iinclude -fsanitize=fuzzer,address -DFUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION
+FUZZ_LDFLAGS := -fsanitize=fuzzer,address -L$(LIB_DIR) -l$(LIB_NAME) -lm -pthread -Wl,-rpath,$(abspath $(LIB_DIR))
+
+.PHONY: fuzz fuzz-run fuzz-corpus
+fuzz: lib
+ifndef FUZZ_CC
+	@echo "clang not found; install clang to build fuzz targets"
+	@exit 1
+endif
+	@mkdir -p $(FUZZ_DIR)
+	$(FUZZ_CC) $(FUZZ_CFLAGS) tests/fuzz/fuzz_wal_apply.c $(FUZZ_LDFLAGS) -o $(FUZZ_DIR)/fuzz_wal_apply
+	$(FUZZ_CC) $(FUZZ_CFLAGS) tests/fuzz/fuzz_grpc_decode.c $(FUZZ_LDFLAGS) -o $(FUZZ_DIR)/fuzz_grpc_decode
+	$(FUZZ_CC) $(FUZZ_CFLAGS) tests/fuzz/fuzz_wal_replay.c $(FUZZ_LDFLAGS) -o $(FUZZ_DIR)/fuzz_wal_replay
+	$(FUZZ_CC) $(FUZZ_CFLAGS) tests/fuzz/fuzz_repl_frame.c $(FUZZ_LDFLAGS) -o $(FUZZ_DIR)/fuzz_repl_frame
+	$(FUZZ_CC) $(FUZZ_CFLAGS) tests/fuzz/fuzz_grpc_frame.c $(FUZZ_LDFLAGS) -o $(FUZZ_DIR)/fuzz_grpc_frame
+	$(FUZZ_CC) $(FUZZ_CFLAGS) tests/fuzz/fuzz_grpc_dispatch.c $(FUZZ_LDFLAGS) -o $(FUZZ_DIR)/fuzz_grpc_dispatch
+	$(FUZZ_CC) $(FUZZ_CFLAGS) tests/fuzz/fuzz_posting_segment.c $(FUZZ_LDFLAGS) -o $(FUZZ_DIR)/fuzz_posting_segment
+	@echo "Built fuzzers in $(FUZZ_DIR)"
+
+fuzz-run: fuzz
+	@echo "Running fuzz_wal_apply..."
+	@$(FUZZ_DIR)/fuzz_wal_apply tests/fuzz/corpus/wal -max_total_time=30 -rss_limit_mb=512 -print_final_stats=1
+	@echo "Running fuzz_grpc_decode..."
+	@$(FUZZ_DIR)/fuzz_grpc_decode tests/fuzz/corpus/grpc -max_total_time=30 -rss_limit_mb=512 -print_final_stats=1
+	@echo "Running fuzz_grpc_frame..."
+	@$(FUZZ_DIR)/fuzz_grpc_frame tests/fuzz/corpus/grpc -max_total_time=30 -rss_limit_mb=512 -print_final_stats=1
+	@echo "Running fuzz_grpc_dispatch..."
+	@$(FUZZ_DIR)/fuzz_grpc_dispatch tests/fuzz/corpus/grpc -max_total_time=30 -rss_limit_mb=512 -print_final_stats=1
+	@echo "Running fuzz_repl_frame..."
+	@$(FUZZ_DIR)/fuzz_repl_frame tests/fuzz/corpus/repl -max_total_time=30 -rss_limit_mb=512 -print_final_stats=1
+	@echo "Running fuzz_posting_segment..."
+	@mkdir -p tests/fuzz/corpus/posting
+	@$(FUZZ_DIR)/fuzz_posting_segment tests/fuzz/corpus/posting -max_total_time=30 -rss_limit_mb=512 -print_final_stats=1
+	@echo "Running fuzz_wal_replay (empty seed corpus; full-file replay)..."
+	@mkdir -p tests/fuzz/corpus/wal_replay_empty
+	@$(FUZZ_DIR)/fuzz_wal_replay tests/fuzz/corpus/wal_replay_empty -runs=5000 -max_len=8192 -rss_limit_mb=512 -print_final_stats=1
+
+fuzz-corpus: lib
+	@bash tests/fuzz/gen_corpus.sh

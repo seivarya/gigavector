@@ -36,6 +36,18 @@ blog/
 *.db
 *.db.*
 *.bin
+*.gv
+*.gvdb
+*.ivfdisk/
+gv_posting_*/
+gv_fuzz_*
+gv_dst_*
+gv_fault_*
+gv_live_*
+gv_grpc_ivf_*
+gv_vis_dst_*
+oom-*
+diskann_data.bin
 
 
 # Python artifacts

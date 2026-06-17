@@ -54,6 +54,10 @@ if [ -z "$OPENAI_API_KEY" ] && [ -z "$ANTHROPIC_API_KEY" ]; then
     echo "Warning: OPENAI_API_KEY and/or ANTHROPIC_API_KEY not set."
     echo "Some tests will be skipped. See .env.example for setup instructions."
 fi
+if [ -z "$GOOGLE_API_KEY" ] && [ -z "$GEMINI_API_KEY" ]; then
+    echo "Warning: GOOGLE_API_KEY not set."
+    echo "Google embedding and Gemini LLM tests will be skipped."
+fi
 export LD_LIBRARY_PATH="$LIB_DIR:${LD_LIBRARY_PATH}"
 "$BUILD_DIR/test_llm" || echo "LLM tests completed (some may have been skipped)"
 

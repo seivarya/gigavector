@@ -138,6 +138,36 @@ jobs:
           UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
         run: ctest --test-dir build-san --output-on-failure --parallel
 
+  # ── libFuzzer + DST (clang, Linux only) ───────────────────────────────
+  fuzz:
+    name: libFuzzer + DST
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4.2.2
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential clang \
+            libcurl4-openssl-dev \
+            libssl-dev \
+            libmicrohttpd-dev
+
+      - name: Build library
+        run: make lib
+
+      - name: Run DST oracles
+        run: |
+          make c-test-single TEST=dst/test_repl_oracle
+          make c-test-single TEST=dst/test_grpc_frame_dst
+
+      - name: Generate fuzz corpus and run fuzzers
+        run: |
+          make fuzz-corpus
+          make fuzz-run
+
   # ── Static analysis (cppcheck, Linux only) ──────────────────────────────
   static-analysis:
     name: static analysis (cppcheck)
