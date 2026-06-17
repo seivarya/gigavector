@@ -164,7 +164,9 @@ void shard_free_list(GV_ShardInfo *shards, size_t count);
 int shard_set_state(GV_ShardManager *mgr, uint32_t shard_id, GV_ShardState state);
 
 /**
- * @brief Start shard rebalancing.
+ * @brief Start rebalancing shards (moves vectors between attached local DBs).
+ *
+ * Moves raw vectors and metadata only.
  *
  * @param mgr Shard manager.
  * @return 0 on success, -1 on error.
@@ -206,6 +208,28 @@ int shard_attach_local(GV_ShardManager *mgr, uint32_t shard_id, GV_Database *db)
  * @return Database pointer, or NULL if not local.
  */
 GV_Database *shard_get_local_db(GV_ShardManager *mgr, uint32_t shard_id);
+
+/**
+ * @brief Migrate vectors between attached local shard databases.
+ *
+ * Copies full vector metadata and inverted-index entries to the destination.
+ *
+ * @return Number of vectors migrated, or -1 on error.
+ */
+int shard_migrate_vectors(GV_ShardManager *mgr, uint32_t from_shard, uint32_t to_shard, size_t count);
+
+/**
+ * @brief Migrate one vector by index between attached local shard databases.
+ *
+ * @param mgr Shard manager.
+ * @param from_shard Source shard ID.
+ * @param to_shard Destination shard ID.
+ * @param vector_index Vector index on the source shard database.
+ * @param out_new_index Optional output for destination vector index.
+ * @return 0 on success, -1 on error.
+ */
+int shard_migrate_vector_at(GV_ShardManager *mgr, uint32_t from_shard, uint32_t to_shard,
+                            size_t vector_index, size_t *out_new_index);
 
 #ifdef __cplusplus
 }

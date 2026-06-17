@@ -5,6 +5,8 @@
 
 #include "admin/shard.h"
 #include "storage/database.h"
+#include "storage/soa_storage.h"
+#include "multimodal/metadata_index.h"
 #include "core/utils.h"
 
 #include <stdlib.h>
@@ -356,10 +358,121 @@ typedef struct {
     size_t count;
 } RebalanceMove;
 
+static int migrate_vector_at_index(GV_Database *from_db, GV_Database *to_db, size_t idx,
+                                   size_t *out_new_index) {
+    if (!from_db || !to_db || from_db->soa_storage == NULL) {
+        return -1;
+    }
+    if (from_db->dimension != to_db->dimension) {
+        return -1;
+    }
+
+    const float *vec = database_get_vector(from_db, idx);
+    if (!vec) {
+        return -1;
+    }
+
+    GV_Metadata *meta = soa_storage_get_metadata(from_db->soa_storage, idx);
+    size_t meta_count = 0;
+    for (GV_Metadata *cur = meta; cur; cur = cur->next) {
+        if (cur->key && cur->value) {
+            meta_count++;
+        }
+    }
+
+    const char **keys = NULL;
+    const char **values = NULL;
+    if (meta_count > 0) {
+        keys = (const char **)calloc(meta_count, sizeof(const char *));
+        values = (const char **)calloc(meta_count, sizeof(const char *));
+        if (!keys || !values) {
+            free(keys);
+            free(values);
+            return -1;
+        }
+        size_t i = 0;
+        for (GV_Metadata *cur = meta; cur; cur = cur->next) {
+            if (cur->key && cur->value) {
+                keys[i] = cur->key;
+                values[i] = cur->value;
+                i++;
+            }
+        }
+    }
+
+    size_t dest_before = database_count(to_db);
+    int rc = db_add_vector_with_rich_metadata(
+        to_db, vec, from_db->dimension, keys, values, meta_count);
+    free(keys);
+    free(values);
+    if (rc != 0) {
+        return -1;
+    }
+
+    if (to_db->metadata_index != NULL) {
+        size_t new_idx = database_count(to_db) - 1;
+        if (database_count(to_db) <= dest_before) {
+            new_idx = dest_before;
+        }
+        if (from_db->metadata_index != NULL) {
+            if (metadata_index_copy_vector(from_db->metadata_index, idx,
+                                           to_db->metadata_index, new_idx) != 0) {
+                return -1;
+            }
+        }
+        for (GV_Metadata *cur = meta; cur; cur = cur->next) {
+            if (cur->key && cur->value) {
+                metadata_index_add(to_db->metadata_index, cur->key, cur->value, new_idx);
+            }
+        }
+        if (out_new_index != NULL) {
+            *out_new_index = new_idx;
+        }
+    } else if (out_new_index != NULL) {
+        *out_new_index = database_count(to_db) - 1;
+        if (database_count(to_db) <= dest_before) {
+            *out_new_index = dest_before;
+        }
+    }
+
+    return db_delete_vector_by_index(from_db, idx);
+}
+
+int shard_migrate_vector_at(GV_ShardManager *mgr, uint32_t from_shard, uint32_t to_shard,
+                            size_t vector_index, size_t *out_new_index) {
+    ShardEntry *from = NULL;
+    ShardEntry *to = NULL;
+
+    for (size_t i = 0; i < mgr->shard_count; i++) {
+        if (mgr->shards[i].shard_id == from_shard) from = &mgr->shards[i];
+        if (mgr->shards[i].shard_id == to_shard) to = &mgr->shards[i];
+    }
+
+    if (!from || !to || !from->local_db || !to->local_db) {
+        return -1;
+    }
+
+    if (from->local_db->dimension != to->local_db->dimension) {
+        return -1;
+    }
+
+    if (vector_index >= database_count(from->local_db)) {
+        return -1;
+    }
+
+    if (migrate_vector_at_index(from->local_db, to->local_db, vector_index, out_new_index) != 0) {
+        return -1;
+    }
+
+    from->vector_count = database_count(from->local_db);
+    to->vector_count = database_count(to->local_db);
+    return 0;
+}
+
 /**
  * @brief Perform actual vector migration between local shards.
  */
-static int migrate_vectors(GV_ShardManager *mgr, uint32_t from_shard, uint32_t to_shard, size_t count) {
+int shard_migrate_vectors(GV_ShardManager *mgr, uint32_t from_shard, uint32_t to_shard, size_t count) {
     ShardEntry *from = NULL;
     ShardEntry *to = NULL;
 
@@ -382,25 +495,15 @@ static int migrate_vectors(GV_ShardManager *mgr, uint32_t from_shard, uint32_t t
     size_t from_count = database_count(from->local_db);
 
     for (size_t i = 0; i < count && from_count > 0; i++) {
-        /* Get last vector from source (simpler than random) */
         size_t idx = from_count - 1;
 
-        /* Get vector data */
-        const float *vec = database_get_vector(from->local_db, idx);
-        if (!vec) break;
-
-        /* Add to destination */
-        if (db_add_vector(to->local_db, vec, dimension) != 0) {
+        if (migrate_vector_at_index(from->local_db, to->local_db, idx, NULL) != 0) {
             break;
         }
 
-        /* Mark as deleted in source */
-        db_delete_vector_by_index(from->local_db, idx);
-
         migrated++;
-        from_count--;
+        from_count = database_count(from->local_db);
 
-        /* Update counts */
         from->vector_count = from_count;
         to->vector_count = database_count(to->local_db);
     }
@@ -497,7 +600,7 @@ int shard_rebalance_start(GV_ShardManager *mgr) {
 
             size_t move_count = (size_t)(to_move < can_receive ? to_move : can_receive);
 
-            int migrated = migrate_vectors(mgr,
+            int migrated = shard_migrate_vectors(mgr,
                 mgr->shards[over_idx].shard_id,
                 mgr->shards[under_idx].shard_id,
                 move_count);

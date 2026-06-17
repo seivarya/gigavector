@@ -259,6 +259,29 @@ int metadata_index_remove_vector(GV_MetadataIndex *index, size_t vector_index) {
     return 0;
 }
 
+int metadata_index_copy_vector(const GV_MetadataIndex *from_index, size_t from_vector_index,
+                               GV_MetadataIndex *to_index, size_t to_vector_index) {
+    if (from_index == NULL || to_index == NULL) {
+        return -1;
+    }
+
+    for (size_t i = 0; i < from_index->bucket_count; ++i) {
+        GV_MetadataKVEntry *entry = from_index->buckets[i].head;
+        while (entry != NULL) {
+            for (size_t j = 0; j < entry->count; ++j) {
+                if (entry->vector_indices[j] == from_vector_index) {
+                    if (metadata_index_add(to_index, entry->key, entry->value, to_vector_index) != 0) {
+                        return -1;
+                    }
+                }
+            }
+            entry = entry->next;
+        }
+    }
+
+    return 0;
+}
+
 int metadata_index_update(GV_MetadataIndex *index, size_t vector_index,
                              const void *old_metadata, const void *new_metadata) {
     if (index == NULL) {

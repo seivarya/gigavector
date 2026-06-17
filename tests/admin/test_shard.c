@@ -2,6 +2,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include "admin/shard.h"
+
+#include "schema/metadata.h"
 #include "storage/database.h"
 
 #define ASSERT(cond, msg) do { if (!(cond)) { fprintf(stderr, "FAIL: %s\n", msg); return -1; } } while(0)
@@ -255,6 +257,95 @@ static int test_shard_get_local_db(void) {
     return 0;
 }
 
+static int test_shard_migrate_preserves_metadata(void) {
+    GV_ShardManager *mgr = shard_manager_create(NULL);
+    ASSERT(mgr != NULL, "create shard manager");
+
+    shard_add(mgr, 0, "node0:6000");
+    shard_add(mgr, 1, "node1:6000");
+
+    GV_Database *db0 = db_open(NULL, 4, GV_INDEX_TYPE_FLAT);
+    GV_Database *db1 = db_open(NULL, 4, GV_INDEX_TYPE_FLAT);
+    ASSERT(db0 != NULL && db1 != NULL, "open databases");
+
+    ASSERT(shard_attach_local(mgr, 0, db0) == 0, "attach shard 0");
+    ASSERT(shard_attach_local(mgr, 1, db1) == 0, "attach shard 1");
+
+    float vec[4] = {1.0f, 0.0f, 0.0f, 0.0f};
+    const char *keys[] = {"memory_id", "content"};
+    const char *values[] = {"mem-1", "Alice likes dark mode"};
+    ASSERT(db_add_vector_with_rich_metadata(db0, vec, 4, keys, values, 2) == 0,
+           "add vector with metadata");
+
+    int migrated = shard_migrate_vectors(mgr, 0, 1, 1);
+    ASSERT(migrated == 1, "migrate one vector");
+    ASSERT(database_count(db1) == 1, "destination should have one vector");
+
+    float q[4] = {1.0f, 0.0f, 0.0f, 0.0f};
+    GV_SearchResult src_res;
+    int src_n = db_search_filtered(db0, q, 1, &src_res, GV_DISTANCE_EUCLIDEAN, "memory_id", "mem-1");
+    ASSERT(src_n == 0, "source should have no searchable vectors after migrate");
+
+    GV_SearchResult res;
+    int n = db_search_filtered(db1, q, 1, &res, GV_DISTANCE_EUCLIDEAN, "memory_id", "mem-1");
+    ASSERT(n == 1, "memory_id metadata searchable on destination");
+    ASSERT(res.vector != NULL, "search result has vector");
+    const char *content = vector_get_metadata(res.vector, "content");
+    ASSERT(content != NULL && strcmp(content, "Alice likes dark mode") == 0,
+           "content metadata preserved");
+    gv_search_results_free(&res, 1);
+
+    shard_manager_destroy(mgr);
+    db_close(db0);
+    db_close(db1);
+    return 0;
+}
+
+static int test_shard_migrate_vector_at(void) {
+    GV_ShardManager *mgr = shard_manager_create(NULL);
+    ASSERT(mgr != NULL, "create shard manager");
+
+    shard_add(mgr, 0, "node0:6000");
+    shard_add(mgr, 1, "node1:6000");
+
+    GV_Database *db0 = db_open(NULL, 4, GV_INDEX_TYPE_FLAT);
+    GV_Database *db1 = db_open(NULL, 4, GV_INDEX_TYPE_FLAT);
+    ASSERT(db0 != NULL && db1 != NULL, "open databases");
+
+    ASSERT(shard_attach_local(mgr, 0, db0) == 0, "attach shard 0");
+    ASSERT(shard_attach_local(mgr, 1, db1) == 0, "attach shard 1");
+
+    float v0[4] = {1.0f, 0.0f, 0.0f, 0.0f};
+    float v1[4] = {0.0f, 1.0f, 0.0f, 0.0f};
+    ASSERT(db_add_vector_with_metadata(db0, v0, 4, "memory_id", "first") == 0, "add v0");
+    ASSERT(db_add_vector_with_metadata(db0, v1, 4, "memory_id", "second") == 0, "add v1");
+    ASSERT(database_count(db0) == 2, "source has two vectors");
+
+    size_t new_idx = 999;
+    ASSERT(shard_migrate_vector_at(mgr, 0, 1, 0, &new_idx) == 0, "migrate index 0");
+    ASSERT(new_idx == 0, "destination index is 0");
+    ASSERT(database_count(db1) == 1, "destination has one vector");
+
+    float q[4] = {1.0f, 0.0f, 0.0f, 0.0f};
+    GV_SearchResult res;
+    int n = db_search_filtered(db1, q, 1, &res, GV_DISTANCE_EUCLIDEAN, "memory_id", "first");
+    ASSERT(n == 1, "migrated vector searchable on destination");
+    gv_search_results_free(&res, 1);
+
+    n = db_search_filtered(db0, q, 1, &res, GV_DISTANCE_EUCLIDEAN, "memory_id", "first");
+    ASSERT(n == 0, "migrated vector removed from source");
+    gv_search_results_free(&res, 1);
+
+    n = db_search_filtered(db0, q, 1, &res, GV_DISTANCE_EUCLIDEAN, "memory_id", "second");
+    ASSERT(n == 1, "remaining vector still on source");
+    gv_search_results_free(&res, 1);
+
+    shard_manager_destroy(mgr);
+    db_close(db0);
+    db_close(db1);
+    return 0;
+}
+
 static int test_shard_rebalance(void) {
     GV_ShardManager *mgr = shard_manager_create(NULL);
     ASSERT(mgr != NULL, "create shard manager");
@@ -354,6 +445,8 @@ int main(void) {
         {"Testing shard_remove...", test_shard_remove},
         {"Testing shard_attach_local...", test_shard_attach_local},
         {"Testing shard_get_local_db...", test_shard_get_local_db},
+        {"Testing shard_migrate_preserves_metadata...", test_shard_migrate_preserves_metadata},
+        {"Testing shard_migrate_vector_at...", test_shard_migrate_vector_at},
         {"Testing shard_rebalance...", test_shard_rebalance},
         {"Testing shard_rebalance_null...", test_shard_rebalance_null},
         {"Testing shard_strategies...", test_shard_strategies},

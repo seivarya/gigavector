@@ -89,6 +89,21 @@ int metadata_index_remove_vector(GV_MetadataIndex *index, size_t vector_index);
 int metadata_index_update(GV_MetadataIndex *index, size_t vector_index,
                              const void *old_metadata, const void *new_metadata);
 
+/**
+ * @brief Copy all inverted-index entries for one vector to another index/vector.
+ *
+ * Used when migrating a vector between databases so link-only entries
+ * (e.g. entity_id from db_link_entity_vector) are preserved.
+ *
+ * @param from_index Source metadata index; must be non-NULL.
+ * @param from_vector_index Source vector index.
+ * @param to_index Destination metadata index; must be non-NULL.
+ * @param to_vector_index Destination vector index.
+ * @return 0 on success, -1 on error.
+ */
+int metadata_index_copy_vector(const GV_MetadataIndex *from_index, size_t from_vector_index,
+                               GV_MetadataIndex *to_index, size_t to_vector_index);
+
 #ifdef __cplusplus
 }
 #endif
