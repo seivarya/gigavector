@@ -175,6 +175,28 @@ static int test_agent_all_types_no_llm(void) {
     return 0;
 }
 
+static int test_agent_create_google_provider(void) {
+    GV_Database *db = create_test_db();
+    ASSERT(db != NULL, "database creation");
+
+    GV_AgentConfig config = {0};
+    config.agent_type = GV_AGENT_QUERY;
+    config.llm_provider = "google";
+    config.api_key = "test-key-not-real";
+    config.model = "gemini-2.5-flash";
+    config.temperature = 0.0f;
+    config.max_retries = 1;
+
+    GV_Agent *agent = agent_create(db, &config);
+    if (agent != NULL) {
+        agent_destroy(agent);
+    }
+
+    db_close(db);
+    remove(TEST_DB);
+    return 0;
+}
+
 int main(void) {
     int failed = 0, passed = 0;
     remove(TEST_DB);
@@ -190,6 +212,7 @@ int main(void) {
         {"test_agent_type_enums",          test_agent_type_enums},
         {"test_agent_schema_hint_null",    test_agent_schema_hint_null},
         {"test_agent_all_types_no_llm",    test_agent_all_types_no_llm},
+        {"test_agent_create_google_provider", test_agent_create_google_provider},
     };
 
     int num_tests = (int)(sizeof(tests) / sizeof(tests[0]));

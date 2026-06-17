@@ -19,6 +19,23 @@
     } while (0)
 
 #define TEST_DB "tmp_test_inference.bin"
+#define TEST_DB_GOOGLE "tmp_test_inference_google.bin"
+
+static void remove_test_db(const char *path) {
+    char wal_path[256];
+    remove(path);
+    snprintf(wal_path, sizeof(wal_path), "%s.wal", path);
+    remove(wal_path);
+}
+
+static const char *get_google_api_key(void) {
+    const char *key = getenv("GOOGLE_API_KEY");
+    if (key && strlen(key) > 0) {
+        return key;
+    }
+    key = getenv("GEMINI_API_KEY");
+    return (key && strlen(key) > 0) ? key : NULL;
+}
 
 static int test_config_init_defaults(void) {
     GV_InferenceConfig config;
@@ -284,6 +301,67 @@ static int test_search_filtered_no_provider(void) {
     return 0;
 }
 
+static int test_create_engine_google_defaults(void) {
+    remove_test_db(TEST_DB_GOOGLE);
+    GV_Database *db = db_open(TEST_DB_GOOGLE, 768, GV_INDEX_TYPE_FLAT);
+    ASSERT(db != NULL, "database creation");
+
+    GV_InferenceConfig config;
+    inference_config_init(&config);
+    config.embed_provider = "google";
+    config.api_key = "test-key";
+    config.dimension = 0;
+
+    GV_InferenceEngine *eng = inference_create(db, &config);
+    ASSERT(eng != NULL, "google inference engine creation with defaults");
+
+    inference_destroy(eng);
+    db_close(db);
+    remove_test_db(TEST_DB_GOOGLE);
+    return 0;
+}
+
+static int test_google_live_add_search(void) {
+    const char *api_key = get_google_api_key();
+    if (!api_key) {
+        return 0;
+    }
+
+    remove_test_db(TEST_DB_GOOGLE);
+    GV_Database *db = db_open(TEST_DB_GOOGLE, 768, GV_INDEX_TYPE_FLAT);
+    if (db == NULL) {
+        return 0;
+    }
+
+    GV_InferenceConfig config;
+    inference_config_init(&config);
+    config.embed_provider = "google";
+    config.api_key = (char *)api_key;
+    config.model = "text-embedding-004";
+    config.dimension = 768;
+
+    GV_InferenceEngine *eng = inference_create(db, &config);
+    if (eng == NULL) {
+        db_close(db);
+        remove_test_db(TEST_DB_GOOGLE);
+        return 0;
+    }
+
+    if (inference_add(eng, "cats and dogs", "{\"topic\":\"pets\"}") == 0) {
+        GV_InferenceResult results[5];
+        memset(results, 0, sizeof(results));
+        int count = inference_search(eng, "pets", 1, results);
+        if (count > 0) {
+            inference_free_results(results, (size_t)count);
+        }
+    }
+
+    inference_destroy(eng);
+    db_close(db);
+    remove_test_db(TEST_DB_GOOGLE);
+    return 0;
+}
+
 int main(void) {
     int failed = 0;
     int passed = 0;
@@ -306,6 +384,8 @@ int main(void) {
         {"test_add_with_metadata",            test_add_with_metadata},
         {"test_add_batch_no_provider",        test_add_batch_no_provider},
         {"test_search_filtered_no_provider",  test_search_filtered_no_provider},
+        {"test_create_engine_google_defaults", test_create_engine_google_defaults},
+        {"test_google_live_add_search",       test_google_live_add_search},
     };
 
     int num_tests = (int)(sizeof(tests) / sizeof(tests[0]));

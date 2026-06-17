@@ -18,7 +18,7 @@ static inline const char *gv_test_tmp_root(void) {
     const char *root = getenv("TMPDIR");
     if (!root || !*root) root = getenv("TEMP");
     if (!root || !*root) root = getenv("TMP");
-    if (!root || !*root) root = ".";
+    if (!root || !*root) root = "/tmp";
     return root;
 }
 

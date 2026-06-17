@@ -15,6 +15,15 @@
 
 #define TEST_DB "tmp_test_auto_embed.bin"
 
+static const char *get_google_api_key(void) {
+    const char *key = getenv("GOOGLE_API_KEY");
+    if (key && strlen(key) > 0) {
+        return key;
+    }
+    key = getenv("GEMINI_API_KEY");
+    return (key && strlen(key) > 0) ? key : NULL;
+}
+
 static int test_config_init_defaults(void) {
     GV_AutoEmbedConfig config;
     memset(&config, 0xFF, sizeof(config));
@@ -35,6 +44,7 @@ static int test_config_init_values(void) {
     ASSERT(config.max_cache_entries == 10000, "default max_cache_entries should be 10000");
     ASSERT(config.max_text_length == 8192, "default max_text_length should be 8192");
     ASSERT(config.batch_size == 32, "default batch_size should be 32");
+    ASSERT(config.dimension == 0, "default dimension should be 0 (provider default)");
 
     return 0;
 }
@@ -238,6 +248,47 @@ static int test_create_destroy_cycle(void) {
     return 0;
 }
 
+static int test_google_provider_defaults(void) {
+    GV_AutoEmbedConfig config;
+    auto_embed_config_init(&config);
+    config.provider = GV_EMBED_PROVIDER_GOOGLE;
+    config.api_key = "test-key";
+
+    GV_AutoEmbedder *embedder = auto_embed_create(&config);
+    ASSERT(embedder != NULL, "google embedder with provider defaults");
+
+    auto_embed_destroy(embedder);
+    return 0;
+}
+
+static int test_google_live_embed(void) {
+    const char *api_key = get_google_api_key();
+    if (!api_key) {
+        return 0;
+    }
+
+    GV_AutoEmbedConfig config;
+    auto_embed_config_init(&config);
+    config.provider = GV_EMBED_PROVIDER_GOOGLE;
+    config.api_key = (char *)api_key;
+    config.model_name = "text-embedding-004";
+    config.dimension = 768;
+
+    GV_AutoEmbedder *embedder = auto_embed_create(&config);
+    if (embedder == NULL) {
+        return 0;
+    }
+
+    size_t dim = 0;
+    float *vec = auto_embed_text(embedder, "Hello, GigaVector!", &dim);
+    if (vec != NULL) {
+        free(vec);
+    }
+
+    auto_embed_destroy(embedder);
+    return 0;
+}
+
 int main(void) {
     int failed = 0;
     int passed = 0;
@@ -257,6 +308,8 @@ int main(void) {
         {"test_config_cache_disabled",   test_config_cache_disabled},
         {"test_stats_structure",         test_stats_structure},
         {"test_create_destroy_cycle",    test_create_destroy_cycle},
+        {"test_google_provider_defaults", test_google_provider_defaults},
+        {"test_google_live_embed",       test_google_live_embed},
     };
 
     int num_tests = (int)(sizeof(tests) / sizeof(tests[0]));

@@ -53,6 +53,14 @@ static int test_db_index_suggest(void) {
     GV_IndexType t3 = index_suggest(16, 10000);
     ASSERT(t3 == GV_INDEX_TYPE_KDTREE, "low-dim large dataset suggests KDTREE");
 
+    GV_IndexType t4 = index_suggest_with_budget(128, 1000000, 64u * 1024u * 1024u, 0);
+    ASSERT(t4 == GV_INDEX_TYPE_IVFDISK || t4 == GV_INDEX_TYPE_DISKANN,
+           "over RAM budget suggests on-disk index");
+
+    GV_IndexType t5 = index_suggest_with_budget(128, 10000, 512u * 1024u * 1024u, 0);
+    ASSERT(t5 == GV_INDEX_TYPE_HNSW || t5 == GV_INDEX_TYPE_KDTREE || t5 == GV_INDEX_TYPE_FLAT,
+           "under RAM budget uses in-memory heuristic");
+
     return 0;
 }
 

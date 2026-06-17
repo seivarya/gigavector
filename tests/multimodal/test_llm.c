@@ -72,6 +72,14 @@ static const char *get_env_api_key(const char *env_var) {
     return key && strlen(key) > 0 ? key : NULL;
 }
 
+static const char *get_google_api_key(void) {
+    const char *key = get_env_api_key("GOOGLE_API_KEY");
+    if (key) {
+        return key;
+    }
+    return get_env_api_key("GEMINI_API_KEY");
+}
+
 void test_llm_create_valid(void) {
     const char *api_key = get_env_api_key("OPENAI_API_KEY");
     if (!api_key) {
@@ -299,7 +307,7 @@ void test_llm_api_call_anthropic(void) {
 }
 
 void test_llm_api_call_gemini(void) {
-    const char *api_key = get_env_api_key("GEMINI_API_KEY");
+    const char *api_key = get_google_api_key();
     if (!api_key) {
         return;
     }

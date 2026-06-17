@@ -56,8 +56,16 @@ static const char *get_env_api_key(const char *key) {
     return NULL;
 }
 
+static const char *get_google_api_key(void) {
+    const char *key = get_env_api_key("GOOGLE_API_KEY");
+    if (key) {
+        return key;
+    }
+    return get_env_api_key("GEMINI_API_KEY");
+}
+
 void test_google_embedding(void) {
-    const char *api_key = get_env_api_key("GEMINI_API_KEY");
+    const char *api_key = get_google_api_key();
     if (!api_key) {
         return;
     }
@@ -91,7 +99,7 @@ void test_google_embedding(void) {
 }
 
 void test_google_embedding_batch(void) {
-    const char *api_key = get_env_api_key("GEMINI_API_KEY");
+    const char *api_key = get_google_api_key();
     if (!api_key) {
         return;
     }

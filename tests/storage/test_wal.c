@@ -230,7 +230,8 @@ static int test_wal_replay_rich(void) {
     int replay_count = 0;
     ReplayCtx ctx = { .count = &replay_count };
 
-    ASSERT(wal_replay_rich(wal_path, 2, on_insert_rich_cb, NULL, NULL, &ctx, GV_INDEX_TYPE_KDTREE) == 0,
+    ASSERT(wal_replay_rich(wal_path, 2, on_insert_rich_cb, NULL, NULL, NULL, &ctx,
+                           GV_INDEX_TYPE_KDTREE) == 0,
            "wal replay rich succeeded");
     ASSERT(replay_count == 1, "replay count is 1");
 
