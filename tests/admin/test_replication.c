@@ -3,6 +3,7 @@
 #include <string.h>
 #include "admin/replication.h"
 #include "storage/database.h"
+#include "storage/memory_layer.h"
 
 #define ASSERT(cond, msg) do { if (!(cond)) { fprintf(stderr, "FAIL: %s\n", msg); return -1; } } while(0)
 
@@ -321,6 +322,51 @@ static int test_replication_register_follower_db(void) {
     return 0;
 }
 
+static int test_replication_route_read_memory(void) {
+    GV_Database *leader_db = db_open(NULL, 4, GV_INDEX_TYPE_FLAT);
+    ASSERT(leader_db != NULL, "create leader database");
+
+    GV_Database *follower_db = db_open(NULL, 4, GV_INDEX_TYPE_FLAT);
+    ASSERT(follower_db != NULL, "create follower database");
+
+    GV_MemoryLayer *leader_mem = memory_layer_create(leader_db, NULL);
+    ASSERT(leader_mem != NULL, "create leader memory layer");
+
+    GV_MemoryLayer *follower_mem = memory_layer_create(follower_db, NULL);
+    ASSERT(follower_mem != NULL, "create follower memory layer");
+
+    GV_ReplicationConfig config;
+    replication_config_init(&config);
+    config.node_id = "mem-leader";
+    config.listen_address = "127.0.0.1:9012";
+
+    GV_ReplicationManager *mgr = replication_create(leader_db, &config);
+    ASSERT(mgr != NULL, "replication_create should succeed");
+
+    replication_add_follower(mgr, "follower-mem", "127.0.0.1:9101");
+    ASSERT(replication_register_follower_db(mgr, "follower-mem", follower_db) == 0,
+           "register follower db");
+    ASSERT(replication_register_follower_memory(mgr, "follower-mem", follower_mem) == 0,
+           "register follower memory");
+
+    replication_set_read_policy(mgr, GV_READ_ROUND_ROBIN);
+    ASSERT(replication_route_read(mgr) == follower_db,
+           "round robin routes db to follower");
+    ASSERT(replication_route_read_memory(mgr) == follower_mem,
+           "round robin routes memory to follower");
+
+    replication_set_read_policy(mgr, GV_READ_LEADER_ONLY);
+    ASSERT(replication_route_read_memory(mgr) == NULL,
+           "leader-only returns NULL memory route");
+
+    memory_layer_destroy(follower_mem);
+    memory_layer_destroy(leader_mem);
+    replication_destroy(mgr);
+    db_close(follower_db);
+    db_close(leader_db);
+    return 0;
+}
+
 static int test_replication_set_max_read_lag(void) {
     GV_Database *db = db_open(NULL, 4, GV_INDEX_TYPE_FLAT);
     ASSERT(db != NULL, "create test database");
@@ -351,6 +397,9 @@ static int test_replication_leader_append_and_sync(void) {
     GV_Database *db = db_open(NULL, 4, GV_INDEX_TYPE_FLAT);
     ASSERT(db != NULL, "create db for wal test");
 
+    GV_Database *follower_db = db_open(NULL, 4, GV_INDEX_TYPE_FLAT);
+    ASSERT(follower_db != NULL, "create follower db for wal test");
+
     GV_ReplicationConfig config;
     replication_config_init(&config);
     config.node_id = "wal-node";
@@ -363,6 +412,8 @@ static int test_replication_leader_append_and_sync(void) {
 
     ASSERT(replication_add_follower(mgr, "f-wal", "127.0.0.1:9100") == 0,
            "add_follower for wal test");
+    ASSERT(replication_register_follower_db(mgr, "f-wal", follower_db) == 0,
+           "register_follower_db for wal test");
 
     ASSERT(replication_leader_append_wal(mgr, 3, 64) == 0, "leader_append_wal");
     ASSERT(replication_sync_commit(mgr, 2000) == 0, "sync_commit after append");
@@ -373,6 +424,7 @@ static int test_replication_leader_append_and_sync(void) {
 
     replication_destroy(mgr);
     db_close(db);
+    db_close(follower_db);
     return 0;
 }
 
@@ -407,6 +459,7 @@ int main(void) {
         {"Testing replication_get_lag...", test_replication_get_lag},
         {"Testing replication_step_down_and_request...", test_replication_step_down_and_request},
         {"Testing replication_register_follower_db...", test_replication_register_follower_db},
+        {"Testing replication_route_read_memory...", test_replication_route_read_memory},
         {"Testing replication_set_max_read_lag...", test_replication_set_max_read_lag},
         {"Testing replication_leader_append_and_sync...", test_replication_leader_append_and_sync},
         {"Testing replication_free_replicas_null...", test_replication_free_replicas_null},

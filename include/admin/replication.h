@@ -20,6 +20,9 @@ extern "C" {
 struct GV_Database;
 typedef struct GV_Database GV_Database;
 
+struct GV_MemoryLayer;
+typedef struct GV_MemoryLayer GV_MemoryLayer;
+
 /**
  * @brief Replication role.
  */
@@ -82,6 +85,9 @@ typedef struct {
  * @brief Opaque replication manager handle.
  */
 typedef struct GV_ReplicationManager GV_ReplicationManager;
+
+struct GV_ReplTransport;
+typedef struct GV_ReplTransport GV_ReplTransport;
 
 /**
  * @brief Initialize replication configuration with defaults.
@@ -305,6 +311,32 @@ int replication_register_follower_db(GV_ReplicationManager *mgr,
                                          const char *node_id, GV_Database *db);
 
 /**
+ * @brief Register a follower's memory layer for read routing.
+ *
+ * Pair with replication_register_follower_db() so memory reranking can use the
+ * same replica selected by replication_route_read().
+ *
+ * @param mgr Replication manager.
+ * @param node_id Follower node ID.
+ * @param layer Follower's memory layer instance.
+ * @return 0 on success, -1 on error.
+ */
+int replication_register_follower_memory(GV_ReplicationManager *mgr,
+                                             const char *node_id,
+                                             GV_MemoryLayer *layer);
+
+/**
+ * @brief Route a memory rerank query to the same replica as vector reads.
+ *
+ * Returns NULL when reads are routed to the leader or the selected follower has
+ * no registered memory layer (caller should use the leader memory layer).
+ *
+ * @param mgr Replication manager.
+ * @return Memory layer for reading, or NULL for leader/fallback.
+ */
+GV_MemoryLayer *replication_route_read_memory(GV_ReplicationManager *mgr);
+
+/**
  * @brief Advance the leader WAL cursor after durable local writes.
  *
  * Call after appending to the leader WAL (or equivalent committed entries).
@@ -319,6 +351,31 @@ int replication_register_follower_db(GV_ReplicationManager *mgr,
 int replication_leader_append_wal(GV_ReplicationManager *mgr,
                                       uint64_t entry_delta,
                                       uint64_t byte_delta);
+
+/**
+ * Enable DST simulation mode: followers are not auto-caught-up and commit
+ * advances only via replication_sync_commit() after explicit acks.
+ */
+int replication_set_dst_simulation_mode(GV_ReplicationManager *mgr, int enabled);
+int replication_get_dst_simulation_mode(const GV_ReplicationManager *mgr);
+
+/** Transport helpers (used by repl_transport.c). */
+GV_Database *replication_get_db(GV_ReplicationManager *mgr);
+const char *replication_get_node_id(const GV_ReplicationManager *mgr);
+const GV_ReplicationConfig *replication_get_config(const GV_ReplicationManager *mgr);
+int replication_replica_handshake(GV_ReplicationManager *mgr, const char *node_id,
+                                  uint64_t *catchup_from_out);
+int replication_replica_ack(GV_ReplicationManager *mgr, const char *node_id,
+                            uint64_t entry_index);
+int replication_follower_apply_entry(GV_ReplicationManager *mgr, uint64_t entry_index,
+                                     const uint8_t *record, size_t len);
+void replication_get_positions(const GV_ReplicationManager *mgr,
+                               uint64_t *wal_position, uint64_t *commit_position);
+void replication_note_leader_heartbeat(GV_ReplicationManager *mgr);
+GV_ReplicationRole replication_get_role_for_transport(const GV_ReplicationManager *mgr);
+
+/** Access TCP transport for hook installation (may be NULL before start). */
+GV_ReplTransport *replication_get_transport(GV_ReplicationManager *mgr);
 
 #ifdef __cplusplus
 }
